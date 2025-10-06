@@ -21,21 +21,28 @@
 
 // Settings
 #define POLLING_RATE 100 // in Hz
-#define REFRESH_RATE 50  // in Hz
+
+#define REFRESH_RATE 5  // in Hz or FPS (same thing)
+
 #define TEMP_SAMPLES 5 // Number of samples to average for temperature reading
 #define TEMP_SAMPLE_RATE 20 // in Hz, how often to sample temperature for averaging
+
 #define R_REF 10000 // Reference resistor value in ohms
 #define R_0 100000 // Resistance of NTC at 25 degrees C
 #define T_0 25 // Reference temperature of the NTC thermistor
-#define R_NTC_B 3950 // B value of the NTC thermistor
+#define R_NTC_B 3950 // B value of the NTC thermistors
 
-#define TOP 0
-#define BOTTOM 1
+#define PID_SAMPLE_TIME 1000 // in ms
+
+#define PWM_PERIOD 500 // frequency of the PWM signal
+#define PWM_STEPS 25
 
 // Information
 
-#define FIRMWARE_VERSION "1.0.0"
-#define DEVICE_NAME "TostiReflow V2"
+#define FIRMWARE_VERSION "0.1.0"
 
 #define SCREEN_WIDTH 480
 #define SCREEN_HEIGHT 320
+
+#define TOP 0
+#define BOTTOM 1
