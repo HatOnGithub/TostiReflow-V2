@@ -16,6 +16,75 @@
 #include "config.h"
 #include "secret.h"
 
+
+/*
+===============================================================================================
+                                    Function Prototypes
+===============================================================================================
+*/
+
+void SetupOTA();
+void SetupWebServer();
+void SetupPID();
+void HandleTouch();
+void SampleTemperatures();
+void SlowPWM();
+void DrawUI();
+void GetTemperature(int from);
+
+void DisplayError(String message);
+
+/*
+===============================================================================================
+                                        Class Declarations
+===============================================================================================
+*/
+
+// Abstract profile step class
+class ProfileStep;
+
+// ------------- Profile steps for combined heating of top and bottom heater ------------
+// Combined steps will always have the convection fan on due to the desire to equally heat both sides
+// Linear ramp step
+class LinearStep;
+// AFAP step -> may cause overshoot
+class InstantStep;
+
+// ----------- Profile steps for independent heating of top and bottom heater ------------
+// Independent linear ramp step
+class BiLinearStep;
+// Independent AFAP step -> may cause overshoot
+class BiInstantStep;
+
+// Abstract page class
+class Page;
+Page* currentPage = nullptr; // pointer to the current page being displayed
+
+// Main navigation page
+class HomePage;
+    // Page for selecting and running profiles
+    class ProfilePage;
+
+    // Page for showing the running a profile and showing progress
+    class MonitorPage;
+
+    // Page for showing submenus for different settings
+    class SettingsPage;
+
+        // Page for setting PID parameters Kp, Ki, and Kd, mainly for tuning
+        class PIDSettingsPage;
+
+        // Page for setting WiFi SSID and Password (and possibly other network settings in the future like MQTT, BT, etc)
+        class NetworkSettingsPage;
+
+            // Page for setting WiFi SSID and Password
+            class WiFiSettingsPage;
+
+/*
+===============================================================================================
+                                          Variables
+===============================================================================================
+*/
 // debug
 bool safemode = false;
 
@@ -30,18 +99,19 @@ uint32_t last_ota_time = 0;
 
 // Display
 TFT_eSPI tft = TFT_eSPI();
-ulong refreshrate = REFRESH_RATE, refreshTime = 1000 / refreshrate, lastRefresh = 0;
-// Display buffer using sprite
-TFT_eSprite buffer = TFT_eSprite(&tft);
+unsigned long refreshrate = REFRESH_RATE, refreshTime = 1000 / refreshrate, lastRefresh = 0;
 
+// Display buffer using sprites
+TFT_eSprite buffer = TFT_eSprite(&tft);
+TFT_eSprite screen = TFT_eSprite(&buffer);
 
 // Touchscreen
 uint16_t startX = 0, startY = 0, lastX = 0, lastY = 0;
 bool isTouched = false, wasTouched = false;
-ulong pollingRate = POLLING_RATE, lastPoll = 0, pollingTime = 1000 / pollingRate;
+unsigned long pollingRate = POLLING_RATE, lastPoll = 0, pollingTime = 1000 / pollingRate;
 
 // ADS and Temperature
-ulong lastTempSample = 0, sampleRate= TEMP_SAMPLE_RATE, sampleTime = 1000 / sampleRate;
+unsigned long lastTempSample = 0, sampleRate= TEMP_SAMPLE_RATE, sampleTime = 1000 / sampleRate;
 double tempSamplesTop[TEMP_SAMPLES], tempSamplesBottom[TEMP_SAMPLES];
 int tempIndex = 0;
 double avgTempTop = 0.0, avgTempBottom = 0.0;
@@ -55,21 +125,69 @@ double Kp = 0.0, Ki = 0.0, Kd = 0.0;
 PID PIDT(&InputT, &OutputT, &SetpointT, Kp, Ki, Kd, DIRECT);
 PID PIDB(&InputB, &OutputB, &SetpointB, Kp, Ki, Kd, DIRECT);
 
-// PWM variables
+// Control variables
 unsigned long lastPeriod = 0; // last time the PWM signal was updated
 unsigned long dutyCycleStep = PWM_PERIOD / PWM_STEPS; // how much to increase the duty cycle each step
+bool fanState = false; // state of the convection fan
 
-// --------------------Function Definitions-------------------------
+// Profile Variables
+String profiles[MAX_PROFILES]; // populated at startup
+String profileName = "";
+uint16_t profileIndex = 0, profileLength = 0;
+unsigned long profileStartTime = 0;
+unsigned long profileEstimatedDuration = 0;
 
-void SetupOTA();
-void SetupWebServer();
-void SetupPID();
-void HandleTouch();
-void SampleTemperatures();
-void DrawUI();
-void GetTemperature(int from);
-// ----------------------------------------------------------------
+ProfileStep* profileSteps[MAX_PROFILE_STEPS]; // populate at profile load
+uint16_t currentStepIndex = 0, totalSteps = 0;
+ProfileStep* currentStep = nullptr; // populate at profile load, reset at profile end or cancel
+bool profileLoaded = false, profileRunning = false;
 
+/*
+===============================================================================================
+                                    Class definitions
+===============================================================================================
+*/
+
+class ProfileStep {
+  public:
+    // Target temperature for this step
+    double finalTempT; 
+    double finalTempB;
+
+    // Duration of this step in milliseconds, 
+    // calculated by Init() based on this step's behavior and the previous step's final temperature
+    unsigned long duration; 
+    
+    // given the final target temperature of the last step, start this step
+    virtual void Init(double endTempT, double endTempB) = 0;
+
+    // Reset any internal variables to prepare for a new profile run
+    virtual void Start() = 0;
+
+    // update the setpoints based on the elapsed time and this step's behavior
+    virtual void Update(double* SetpointT, double* SetpointB) = 0;
+
+    // Signal that the next step should start
+    virtual bool IsComplete() = 0;
+
+    // Draw itself on a graph sprite at position x,y with given step sizes (1 pixel = stepX in time, 1 pixel = stepY in temperature)
+    virtual void DrawOnGraph(TFT_eSprite* graphSprite, uint16_t startX, uint16_t startY, double stepX, double stepY) = 0;
+};
+
+class Page {
+  public:
+    virtual void Update() = 0;
+    virtual void Draw() = 0;
+    virtual void OnTouch(uint16_t x, uint16_t y) = 0;
+    virtual void UpdateTouch(uint16_t x, uint16_t y) = 0;
+    virtual void OnRelease() = 0;
+};
+
+/*
+===============================================================================================
+                                        Setup & Loop
+===============================================================================================
+*/
 
 void setup(){
 
@@ -116,6 +234,9 @@ void setup(){
   
   buffer.createSprite(SCREEN_WIDTH, SCREEN_HEIGHT);
   buffer.setFreeFont( &FreeSans9pt7b );
+
+  screen.createSprite(DRAW_WIDTH, DRAW_HEIGHT);
+  screen.setFreeFont( &FreeSans9pt7b );
 
   delay(500);
 
@@ -166,9 +287,6 @@ void setup(){
   delay(500);
   safemode |= tft.getTouch(&x, &y);
 
-  tft.setTextColor(TFT_BLACK);
-  tft.fillScreen(TFT_WHITE);
-
   if (safemode) {
     tft.fillScreen(TFT_BLACK);
     tft.setTextColor(TFT_RED);
@@ -195,13 +313,26 @@ void setup(){
 void loop(){
   ArduinoOTA.handle();
 
-  if (safemode) return;
+  if (safemode) {
+    // Ensure everything is off
+    digitalWrite(RELAY_B, LOW);
+    digitalWrite(RELAY_T, LOW);
+    digitalWrite(RELAY_F, LOW);
+    return;
+  }
 
   HandleTouch();
   SampleTemperatures();
+  SlowPWM();
   DrawUI();
 
 }
+
+/*
+===============================================================================================
+                                    Setup Functions
+===============================================================================================
+*/
 
 void SetupWebServer(){
   Serial0.println("Wifi and Webserver init");
@@ -308,6 +439,13 @@ void SetupPID(){
   OutputB = 0; // initialize OutputB to 0
 }
 
+/*
+===============================================================================================
+                                    Main Loop Functions
+===============================================================================================
+*/
+
+
 void DrawUI(){
   if (millis() - lastRefresh < refreshTime) return;
   lastRefresh = millis();
@@ -318,7 +456,7 @@ void DrawUI(){
   buffer.fillSprite(TFT_WHITE);
 
   // Top bar with temperatures
-  buffer.fillRect(0,0, SCREEN_WIDTH, 20, TFT_BLACK);
+  buffer.fillRect(0,0, SCREEN_WIDTH, 25, TFT_BLACK);
   buffer.setCursor(5 ,15);
   buffer.setTextColor(TFT_WHITE, TFT_BLACK, true);
   buffer.print("TostiReflow V2 - v" FIRMWARE_VERSION);
@@ -343,8 +481,29 @@ void DrawUI(){
   buffer.setTextColor(TFT_WHITE, TFT_BLACK, true);
   buffer.print("C");
 
-  // Draw page, TODO
+  buffer.fillRect(0, DRAW_TOP, DRAW_LEFT, DRAW_HEIGHT, TFT_BLACK); // left margin
 
+  buffer.drawRect(0, DRAW_TOP, DRAW_LEFT, DRAW_LEFT, TFT_YELLOW);
+  // fan indicator
+  if (fanState)
+    buffer.fillRect(2, DRAW_TOP+2, DRAW_LEFT - 4, DRAW_LEFT - 4, TFT_YELLOW);
+  
+  // PID output indicator
+  int halfRemainingHeight = (SCREEN_HEIGHT - DRAW_TOP - DRAW_LEFT) / 2; // half of the remaining height in the box
+
+  buffer.drawRect(0, DRAW_TOP + DRAW_LEFT, DRAW_LEFT, halfRemainingHeight, TFT_BLUE);
+  int pidHeightT = (int)(OutputT * halfRemainingHeight);
+  buffer.fillRect(2, DRAW_TOP + DRAW_LEFT + halfRemainingHeight - pidHeightT, DRAW_LEFT - 2, pidHeightT, TFT_BLUE);
+
+  buffer.drawRect(0, DRAW_TOP + DRAW_LEFT + halfRemainingHeight, DRAW_LEFT, halfRemainingHeight, TFT_GREEN);
+  int pidHeightB = (int)(OutputB * halfRemainingHeight);
+  buffer.fillRect(2, DRAW_TOP + DRAW_LEFT + halfRemainingHeight + halfRemainingHeight - pidHeightB, DRAW_LEFT - 2, pidHeightB, TFT_GREEN);
+
+  if (currentPage != nullptr) {
+    currentPage->Draw();
+  }
+
+  screen.pushToSprite(&buffer, DRAW_LEFT, DRAW_TOP); // draw screen below top bar
   // write the buffer to the screen
   buffer.pushSprite(0,0);
 
@@ -368,12 +527,22 @@ void HandleTouch(){
     if (!wasTouched) {
       startX = lastX;
       startY = lastY;
+      if (currentPage != nullptr) {
+        currentPage->OnTouch(lastX, lastY);
+      }
     }
-
+    // Continuous touch
+    else {
+      if (currentPage != nullptr) {
+        currentPage->UpdateTouch(lastX, lastY);
+      }
+    }
   }
   // Falling edge
   else if (wasTouched) {
-
+    if (currentPage != nullptr) {
+      currentPage->OnRelease();
+    }
   }
   // Not touched
   else{
@@ -411,18 +580,14 @@ void GetTemperature(int from){
   } else if (from == BOTTOM) {
     while(!ads.setInputMultiplexer(ADS1219_CONFIG_MUX_DIFF_P0_N1));
   } else {
-    tft.setTextColor(TFT_RED);
-    tft.println("GetTemperature: Invalid 'from' argument");
-    delay(1000);
+    DisplayError("GetTemperature: Invalid 'from' argument");
     return;
   }
 
   ads.startSync();
   while (!ads.dataReady());
   if (!ads.readConversion()) {
-    tft.setTextColor(TFT_RED);
-    tft.println("Failed to read conversion from ADS1219");
-    delay(1000);
+    DisplayError("Failed to read from ADS1219");
     return;
   }
 
@@ -438,3 +603,61 @@ void GetTemperature(int from){
     tempSamplesBottom[tempIndex] = temperature;
   }
 }
+
+void SlowPWM(){
+
+  digitalWrite(RELAY_F, fanState ? HIGH : LOW); // Fan always on when heating
+
+  if (!profileRunning) {
+    digitalWrite(RELAY_T, LOW);
+    digitalWrite(RELAY_B, LOW);
+    return;
+  }
+
+  if (millis() - lastPeriod >= (unsigned long)(OutputT * dutyCycleStep))
+    digitalWrite(RELAY_T, LOW);
+
+  if (millis() - lastPeriod >= (unsigned long)(OutputB * dutyCycleStep))
+    digitalWrite(RELAY_B, LOW);
+
+  if (millis() - lastPeriod < PWM_PERIOD) return;
+  lastPeriod = millis();
+
+  if (OutputT > 0) digitalWrite(RELAY_T, HIGH); // update PWM
+  if (OutputB > 0) digitalWrite(RELAY_B, HIGH);
+}
+
+void DisplayError(String message) {
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextColor(TFT_RED);
+  tft.setTextSize(2);
+  tft.setCursor(150 , 100);
+  tft.println("ERROR");
+  
+  tft.setTextSize(1);
+  tft.setCursor(50 , 150);
+  tft.println(message);
+
+  analogWriteFrequency(1000);
+
+  analogWrite(BUZZER_PIN, 2048);
+  delay(2000);
+  analogWrite(BUZZER_PIN, 0);
+
+  analogWriteFrequency(5000);
+
+  safemode = true;
+}
+
+/*
+===============================================================================================
+                                  Touchscreen UI Pages
+===============================================================================================
+*/
+
+
+/*
+===============================================================================================
+                                   Webpages and APIs
+===============================================================================================
+*/

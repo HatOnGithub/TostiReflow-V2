@@ -37,12 +37,21 @@
 #define PWM_PERIOD 500 // frequency of the PWM signal
 #define PWM_STEPS 25
 
+#define MAX_PROFILES 50 // Maximum number of profiles that can be stored
+#define MAX_PROFILE_STEPS 100 // Maximum number of steps in a profile
+
 // Information
 
 #define FIRMWARE_VERSION "0.1.0"
 
 #define SCREEN_WIDTH 480
 #define SCREEN_HEIGHT 320
+
+#define DRAW_TOP 25 // Height of the top bar
+#define DRAW_LEFT 25 // Left margin for the drawable area
+
+#define DRAW_WIDTH 455 // Width of the drawable area
+#define DRAW_HEIGHT 295 // Height of the drawable area (excluding top bar)
 
 #define TOP 0
 #define BOTTOM 1
