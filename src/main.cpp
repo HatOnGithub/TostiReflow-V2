@@ -1,10 +1,13 @@
 #include <Arduino.h>
+#include <Esp.h>
 #include <Wire.h>
 #include <SPI.h>
 #include <TFT_eSPI.h>
 #include <SparkFun_ADS1219.h>
 #include <PID_v1.h>
 #include "esp_ota_ops.h"
+#include "LittleFS.h"
+#include <EEPROM.h>
 
 #include <WiFi.h>
 #include <WebServer.h>
@@ -12,6 +15,8 @@
 #include <ArduinoJson.h>
 
 #include <ArduinoOTA.h>
+
+#include "pages.h"
 
 #include "config.h"
 #include "secret.h"
@@ -24,15 +29,20 @@
 */
 
 void SetupOTA();
+void SetupWiFi();
 void SetupWebServer();
 void SetupPID();
+void SetupFS();
 void HandleTouch();
 void SampleTemperatures();
 void SlowPWM();
 void DrawUI();
 void GetTemperature(int from);
 
+void OnConnect();
+
 void DisplayError(String message);
+void DisplaySafeMode();
 
 /*
 ===============================================================================================
@@ -56,29 +66,15 @@ class BiLinearStep;
 // Independent AFAP step -> may cause overshoot
 class BiInstantStep;
 
-// Abstract page class
-class Page;
 Page* currentPage = nullptr; // pointer to the current page being displayed
 
-// Main navigation page
-class HomePage;
-    // Page for selecting and running profiles
-    class ProfilePage;
-
-    // Page for showing the running a profile and showing progress
-    class MonitorPage;
-
-    // Page for showing submenus for different settings
-    class SettingsPage;
-
-        // Page for setting PID parameters Kp, Ki, and Kd, mainly for tuning
-        class PIDSettingsPage;
-
-        // Page for setting WiFi SSID and Password (and possibly other network settings in the future like MQTT, BT, etc)
-        class NetworkSettingsPage;
-
-            // Page for setting WiFi SSID and Password
-            class WiFiSettingsPage;
+HomePage homePage;
+ProfilePage profilePage;
+MonitorPage monitorPage;
+SettingsPage settingsPage;
+PIDSettingsPage pidSettingsPage;
+NetworkSettingsPage networkSettingsPage;
+WiFiSettingsPage wifiSettingsPage;
 
 /*
 ===============================================================================================
@@ -174,14 +170,7 @@ class ProfileStep {
     virtual void DrawOnGraph(TFT_eSprite* graphSprite, uint16_t startX, uint16_t startY, double stepX, double stepY) = 0;
 };
 
-class Page {
-  public:
-    virtual void Update() = 0;
-    virtual void Draw() = 0;
-    virtual void OnTouch(uint16_t x, uint16_t y) = 0;
-    virtual void UpdateTouch(uint16_t x, uint16_t y) = 0;
-    virtual void OnRelease() = 0;
-};
+
 
 /*
 ===============================================================================================
@@ -230,27 +219,39 @@ void setup(){
   tft.setCursor(0 ,20);
   tft.setTextColor(TFT_WHITE);
   tft.println("Firmware v" FIRMWARE_VERSION);
-  tft.println("TFT, Buffer, and Touchscreen initialized");
+  tft.println("TFT and Touchscreen initialized");
+
+  safemode |= tft.getTouch(&lastX, &lastY); // read initial touch state to check for safe mode
+
+  // ========== Setup WiFi ============
+  SetupWiFi();
   
-  buffer.createSprite(SCREEN_WIDTH, SCREEN_HEIGHT);
-  buffer.setFreeFont( &FreeSans9pt7b );
-
-  screen.createSprite(DRAW_WIDTH, DRAW_HEIGHT);
-  screen.setFreeFont( &FreeSans9pt7b );
-
+  safemode |= tft.getTouch(&lastX, &lastY); // read initial touch state to check for safe mode
   delay(500);
 
-  uint16_t x, y;
-  safemode |= tft.getTouch(&x, &y);
+  // =========== Setup OTA ==============
+  SetupOTA();
+
+  safemode |= tft.getTouch(&lastX, &lastY); // read initial touch state to check for safe mode
+  delay(500);
+
+  // ========== Check for safe mode ============
+  // As the bare essentials have been set up, check for touchscreen input to enter safe mode
+  if (safemode == true) {
+    DisplaySafeMode();
+    Serial0.println("Safe mode activated due to touchscreen input at startup");
+    return;
+  }
+
+  delay(500);
+  tft.println("No input detected, continuing setup...");
 
   // ========== Setup PID ============
   Serial0.println("PID init");
   tft.println("PID initializing...");
   SetupPID();
-  tft.println("PID initialized");
 
   delay(500);
-  safemode |= tft.getTouch(&x, &y);
 
   // ========== Setup ADS1219 ============
   Serial0.println("Auxilary ADC init");
@@ -264,50 +265,33 @@ void setup(){
   ads.setVoltageReference(ADS1219_VREF_EXTERNAL);
   ads.setGain(ADS1219_GAIN_1);
 
-  tft.println("ADC initialized");
+  delay(500);
+
+  // ======== Setup File System ==========
+  SetupFS();
 
   delay(500);
-  safemode |= tft.getTouch(&x, &y);
-
   // ======== Setup Webserver ==========
+
   SetupWebServer();
 
   delay(500);
-  safemode |= tft.getTouch(&x, &y);
 
-  // =========== Setup OTA ==============
-  SetupOTA();
+  // ====== Setup Sprite Buffers =======
+  Serial0.println("Sprite buffers init");
+  tft.println("Sprite buffers initializing...");
+  buffer.createSprite(SCREEN_WIDTH, SCREEN_HEIGHT);
+  buffer.setFreeFont( &FreeSans9pt7b );
+  buffer.setAttribute(PSRAM_ENABLE, true); // enable psram for the sprite buffer
 
-  delay(500);
-  safemode |= tft.getTouch(&x, &y);
+  screen.createSprite(DRAW_WIDTH, DRAW_HEIGHT);
+  screen.setFreeFont( &FreeSans9pt7b );
+  screen.setAttribute(PSRAM_ENABLE, true); // enable psram for the sprite buffer
 
   // =========== Finalize ==============
 
   tft.println("Setup complete");
   delay(500);
-  safemode |= tft.getTouch(&x, &y);
-
-  if (safemode) {
-    tft.fillScreen(TFT_BLACK);
-    tft.setTextColor(TFT_RED);
-    tft.setTextSize(2);
-    tft.setCursor(150 , 100);
-    tft.println("SAFE MODE");
-    
-    tft.setTextSize(1);
-    tft.setCursor(110 , 150);
-    tft.println("OTA Active, listening for updates...");
-    tft.setCursor(130 , 180);
-    tft.println("Restart to leave safe mode");
-
-    analogWriteFrequency(1000);
-
-    analogWrite(BUZZER_PIN, 2048);
-    delay(2000);
-    analogWrite(BUZZER_PIN, 0);
-
-    analogWriteFrequency(5000);
-  }
 }
 
 void loop(){
@@ -334,9 +318,10 @@ void loop(){
 ===============================================================================================
 */
 
-void SetupWebServer(){
-  Serial0.println("Wifi and Webserver init");
-  tft.println("Wifi and Webserver initializing...");
+void SetupWiFi(){
+  
+  Serial0.println("Wifi init");
+  tft.println("Wifi initializing...");
 
   WiFi.begin(ssid, password);
   
@@ -352,7 +337,11 @@ void SetupWebServer(){
   Serial0.println(IP);
   tft.print("IP Address: ");
   tft.println(IP);
+}
 
+void SetupWebServer(){
+  Serial0.println("Webserver init");
+  tft.println("Webserver initializing...");
   server.begin();
 
   if (!MDNS.begin("tostireflow")) {
@@ -361,8 +350,33 @@ void SetupWebServer(){
     tft.println("mDNS responder started");
   }
 
-  tft.println("Wifi and Webserver initialized");
+  server.serveStatic("/static", LittleFS, "/static");
+}
 
+// This functions mounts LittleFS
+void SetupFS() {
+  Serial0.println("File system init");
+  tft.println("File system initializing...");
+  if (!LittleFS.begin()) {
+    Serial0.println("LittleFS Mount Failed");
+    tft.println("LittleFS Mount Failed");
+    return;
+  }
+
+  Serial0.println("LittleFS Mounted Successfully");
+  Serial0.println("File System Storage:");
+  Serial0.print(LittleFS.usedBytes());
+  Serial0.print(" / ");
+  Serial0.print(LittleFS.totalBytes());
+  Serial0.print(" (" + String((float)LittleFS.usedBytes() / (float)LittleFS.totalBytes() * 100, 2) + "%)");
+  Serial0.println(" bytes used");
+  tft.print("Storage: ");
+  tft.print(LittleFS.usedBytes());
+  tft.print(" / ");
+  tft.print(LittleFS.totalBytes());
+  tft.print(" (");
+  tft.print((float)LittleFS.usedBytes() / (float)LittleFS.totalBytes() * 100, 2);
+  tft.println("%) bytes used");
 }
 
 void SetupOTA(){
@@ -413,7 +427,7 @@ void SetupOTA(){
 
   ArduinoOTA.begin();
 
-  tft.println("OTA handler initialized");
+  tft.println("OTA handler initialized, check for safe mode...");
 }
 
 // This function sets up the PID controller
@@ -649,11 +663,30 @@ void DisplayError(String message) {
   safemode = true;
 }
 
-/*
-===============================================================================================
-                                  Touchscreen UI Pages
-===============================================================================================
-*/
+void DisplaySafeMode(){
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextColor(TFT_RED);
+  tft.setTextSize(2);
+  tft.setCursor(150 , 100);
+  tft.println("SAFE MODE");
+  
+  tft.setTextSize(1);
+  tft.setCursor(110 , 150);
+  tft.println("OTA Active, listening for updates...");
+  tft.setCursor(130 , 180);
+  tft.println("Restart to leave safe mode");
+
+  analogWriteFrequency(1000);
+
+  analogWrite(BUZZER_PIN, 2048);
+  delay(2000);
+  analogWrite(BUZZER_PIN, 0);
+
+  analogWriteFrequency(5000);
+  
+}
+
+
 
 
 /*
@@ -661,3 +694,19 @@ void DisplayError(String message) {
                                    Webpages and APIs
 ===============================================================================================
 */
+
+void NotFound(){
+  Serial.println("Not Found: " + server.uri());
+  server.send(404, "text/plain", "Not Found");
+}
+
+void OnConnect(){
+  fs::File file = LittleFS.open("/static/index.html", "r");
+  if (!file) {
+    Serial.println("Failed to open file for reading");
+    server.send(404, "text/plain", "File not found");
+    return;
+  }
+  server.streamFile(file, "text/html");
+  file.close();
+}
