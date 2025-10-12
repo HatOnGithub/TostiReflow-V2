@@ -5,7 +5,6 @@
 #include <TFT_eSPI.h>
 #include <SparkFun_ADS1219.h>
 #include <PID_v1.h>
-#include "esp_ota_ops.h"
 #include "LittleFS.h"
 #include <EEPROM.h>
 
@@ -13,11 +12,9 @@
 #include <WebServer.h>
 #include <ESPmDNS.h>
 #include <ArduinoJson.h>
-
 #include <ArduinoOTA.h>
 
 #include "pages.h"
-
 #include "config.h"
 #include "secret.h"
 
@@ -33,6 +30,7 @@ void SetupWiFi();
 void SetupWebServer();
 void SetupPID();
 void SetupFS();
+void SetupPages();
 void HandleTouch();
 void SampleTemperatures();
 void SlowPWM();
@@ -68,14 +66,6 @@ class BiInstantStep;
 
 Page* currentPage = nullptr; // pointer to the current page being displayed
 
-HomePage homePage;
-ProfilePage profilePage;
-MonitorPage monitorPage;
-SettingsPage settingsPage;
-PIDSettingsPage pidSettingsPage;
-NetworkSettingsPage networkSettingsPage;
-WiFiSettingsPage wifiSettingsPage;
-
 /*
 ===============================================================================================
                                           Variables
@@ -83,6 +73,7 @@ WiFiSettingsPage wifiSettingsPage;
 */
 // debug
 bool safemode = false;
+unsigned long lastLoopStart = 0, lastLoopEnd = 0, loopDuration = 0;
 
 // Wireless
 const char* ssid = SSID;
@@ -98,8 +89,9 @@ TFT_eSPI tft = TFT_eSPI();
 unsigned long refreshrate = REFRESH_RATE, refreshTime = 1000 / refreshrate, lastRefresh = 0;
 
 // Display buffer using sprites
+TFT_eSprite topBar = TFT_eSprite(&tft);
+TFT_eSprite leftBar = TFT_eSprite(&tft);
 TFT_eSprite buffer = TFT_eSprite(&tft);
-TFT_eSprite screen = TFT_eSprite(&buffer);
 
 // Touchscreen
 uint16_t startX = 0, startY = 0, lastX = 0, lastY = 0;
@@ -170,6 +162,60 @@ class ProfileStep {
     virtual void DrawOnGraph(TFT_eSprite* graphSprite, uint16_t startX, uint16_t startY, double stepX, double stepY) = 0;
 };
 
+// =================================================================================================
+//                                    Page class instances
+// =================================================================================================    
+
+SemaphoreHandle_t SPI_Mutex = xSemaphoreCreateMutex();
+
+HomePage homePage = HomePage(&buffer, &currentPage, &SPI_Mutex);
+ProfilePage profilePage = ProfilePage(&buffer, &currentPage, &SPI_Mutex);
+MonitorPage monitorPage = MonitorPage(&buffer, &currentPage, &SPI_Mutex);
+SettingsPage settingsPage = SettingsPage(&buffer, &currentPage, &SPI_Mutex);
+PIDSettingsPage pidSettingsPage = PIDSettingsPage(&buffer, &currentPage, &SPI_Mutex);
+NetworkSettingsPage networkSettingsPage = NetworkSettingsPage(&buffer, &currentPage, &SPI_Mutex);
+WiFiSettingsPage wifiSettingsPage = WiFiSettingsPage(&buffer, &currentPage, &SPI_Mutex);
+
+/*
+===============================================================================================
+                                          Task Setup
+===============================================================================================
+*/
+
+TaskHandle_t WebServerTaskHandle;
+TaskHandle_t DrawTaskHandle;
+TaskHandle_t TouchTaskHandle;
+TaskHandle_t TimeCriticalTasksHandle;
+
+void WebServerTask( void * parameter ){
+  for(;;){
+    server.handleClient();
+    vTaskDelay( 1 / portTICK_PERIOD_MS);
+  }
+}
+
+void DrawTask( void * parameter ){
+  for(;;){
+    DrawUI();
+    
+    vTaskDelay(  (1000 / REFRESH_RATE)  / portTICK_PERIOD_MS );
+  }
+}
+
+void TouchTask( void * parameter ){
+  for(;;){
+    HandleTouch();
+    vTaskDelay(  (1000 / POLLING_RATE)  / portTICK_PERIOD_MS);
+  }
+}
+
+void TimeCriticalTasks( void * parameter ){
+  for(;;){
+    SampleTemperatures();
+    SlowPWM();
+    vTaskDelay( 10  / portTICK_PERIOD_MS);
+  }
+}
 
 
 /*
@@ -188,19 +234,12 @@ void setup(){
 
   // ============== Startup Sound ==============
   analogWriteResolution(12);
-  analogWriteFrequency(500);
 
+  analogWriteFrequency(2000);
   analogWrite(BUZZER_PIN, 2048);
   delay(100);
   
-  analogWriteFrequency(1000);
-  delay(100);
-
-  analogWriteFrequency(2000);
-  delay(100);
-  
   analogWrite(BUZZER_PIN, 0);
-  analogWriteFrequency(5000);
 
   // ====== Start communication interfaces ======
   Serial0.begin(115200);
@@ -246,6 +285,7 @@ void setup(){
   delay(500);
   tft.println("No input detected, continuing setup...");
 
+
   // ========== Setup PID ============
   Serial0.println("PID init");
   tft.println("PID initializing...");
@@ -280,21 +320,80 @@ void setup(){
   // ====== Setup Sprite Buffers =======
   Serial0.println("Sprite buffers init");
   tft.println("Sprite buffers initializing...");
-  buffer.createSprite(SCREEN_WIDTH, SCREEN_HEIGHT);
+  buffer.createSprite(DRAW_WIDTH, DRAW_HEIGHT);
   buffer.setFreeFont( &FreeSans9pt7b );
   buffer.setAttribute(PSRAM_ENABLE, true); // enable psram for the sprite buffer
 
-  screen.createSprite(DRAW_WIDTH, DRAW_HEIGHT);
-  screen.setFreeFont( &FreeSans9pt7b );
-  screen.setAttribute(PSRAM_ENABLE, true); // enable psram for the sprite buffer
+  topBar.createSprite(SCREEN_WIDTH, DRAW_TOP);
+  topBar.setFreeFont( &FreeSans9pt7b );
+  topBar.setAttribute(PSRAM_ENABLE, true); // enable psram for the sprite buffer
 
+  leftBar.createSprite(DRAW_LEFT, DRAW_HEIGHT);
+  leftBar.setFreeFont( &FreeSans9pt7b );
+  leftBar.setAttribute(PSRAM_ENABLE, true); // enable psram for the sprite buffer
+
+  delay(500);
+
+  // ========== Setup Pages ============
+  Serial0.println("Pages init");
+  tft.println("Pages initializing...");
+  SetupPages();
+  
+  delay(500);
+
+  // =========== Setup Tasks ==============
+  Serial0.println("Tasks init");
+  tft.println("Tasks initializing...");
+
+  xTaskCreatePinnedToCore(
+    WebServerTask,          /* Function to implement the task */
+    "Web Server Task",       /* Name of the task */
+    10000,            /* Stack size in words */
+    NULL,             /* Task input parameter */
+    0,                /* Priority of the task */
+    &WebServerTaskHandle,  /* Task handle. */
+    1);               /* Core where the task should run */
+
+  xTaskCreatePinnedToCore(
+    DrawTask,          /* Function to implement the task */
+    "Draw Task",       /* Name of the task */
+    50000,            /* Stack size in words */
+    NULL,             /* Task input parameter */
+    1,                /* Priority of the task */
+    &DrawTaskHandle,  /* Task handle. */
+    1);               /* Core where the task should run */
+
+  xTaskCreatePinnedToCore(
+    TouchTask,          /* Function to implement the task */
+    "Touch Task",       /* Name of the task */
+    10000,            /* Stack size in words */
+    NULL,             /* Task input parameter */
+    2,                /* Priority of the task */
+    &TouchTaskHandle,  /* Task handle. */
+    1);               /* Core where the task should run */
+             /* Core where the task should run */
+
+  xTaskCreatePinnedToCore(
+    TimeCriticalTasks,          /* Function to implement the task */
+    "Temperature Task",       /* Name of the task */
+    10000,            /* Stack size in words */
+    NULL,             /* Task input parameter */
+    3,                /* Priority of the task */
+    &TimeCriticalTasksHandle,  /* Task handle. */
+    0);  
+
+  delay(500);
   // =========== Finalize ==============
 
   tft.println("Setup complete");
   delay(500);
+  tft.fillScreen(TFT_BLACK);
 }
 
 void loop(){
+  loopDuration = lastLoopEnd - lastLoopStart;
+  lastLoopStart = millis();
+
   ArduinoOTA.handle();
 
   if (safemode) {
@@ -305,11 +404,11 @@ void loop(){
     return;
   }
 
-  HandleTouch();
-  SampleTemperatures();
-  SlowPWM();
-  DrawUI();
+  if (currentPage != nullptr){
+    currentPage->Update();
+  }
 
+  lastLoopEnd = millis();
 }
 
 /*
@@ -331,6 +430,12 @@ void SetupWiFi(){
     delay(5000);
     ESP.restart();
   }
+  
+  if (!MDNS.begin("tostireflow")) {
+    tft.println("Error setting up MDNS responder!");
+  } else {
+    tft.println("mDNS responder started");
+  }
 
   IPAddress IP = WiFi.localIP();
   Serial0.print("AP IP address: ");
@@ -343,12 +448,6 @@ void SetupWebServer(){
   Serial0.println("Webserver init");
   tft.println("Webserver initializing...");
   server.begin();
-
-  if (!MDNS.begin("tostireflow")) {
-    tft.println("Error setting up MDNS responder!");
-  } else {
-    tft.println("mDNS responder started");
-  }
 
   server.serveStatic("/static", LittleFS, "/static");
 }
@@ -394,6 +493,15 @@ void SetupOTA(){
         type = "filesystem";
       }
 
+      if (!safemode){
+        vTaskSuspend(DrawTaskHandle);
+        vTaskSuspend(TouchTaskHandle);
+        vTaskSuspend(TimeCriticalTasksHandle);
+        digitalWrite(RELAY_B, LOW);
+        digitalWrite(RELAY_T, LOW);
+        digitalWrite(RELAY_F, LOW);
+      }
+
       tft.fillScreen(TFT_BLACK);
       tft.setCursor(160 , 100);
       tft.setTextColor(TFT_WHITE);
@@ -430,6 +538,22 @@ void SetupOTA(){
   tft.println("OTA handler initialized, check for safe mode...");
 }
 
+void SetupPages(){
+  homePage.LinkPages(&profilePage, &settingsPage, &monitorPage);
+  profilePage.LinkPages(&homePage);
+  monitorPage.LinkPages(&homePage);
+  settingsPage.LinkPages(&homePage, 
+    new String[SETTING_SUBPAGES]{ "PID Settings", "Network Settings" }, 
+    new Page*[SETTING_SUBPAGES]{&pidSettingsPage, &networkSettingsPage}, SETTING_SUBPAGES);
+  pidSettingsPage.LinkPages(&settingsPage);
+  networkSettingsPage.LinkPages(&settingsPage, 
+    new String[NETWORK_SUBPAGES]{ "WiFi Settings" },
+     new Page*[NETWORK_SUBPAGES]{&wifiSettingsPage}, NETWORK_SUBPAGES);
+  wifiSettingsPage.LinkPages(&networkSettingsPage);
+
+  currentPage = &homePage;
+}
+
 // This function sets up the PID controller
 void SetupPID(){
   SetpointT = 0;
@@ -461,76 +585,71 @@ void SetupPID(){
 
 
 void DrawUI(){
-  if (millis() - lastRefresh < refreshTime) return;
-  lastRefresh = millis();
 
   // Use buffer to draw the UI
 
-  // Background
-  buffer.fillSprite(TFT_WHITE);
-
   // Top bar with temperatures
-  buffer.fillRect(0,0, SCREEN_WIDTH, 25, TFT_BLACK);
-  buffer.setCursor(5 ,15);
-  buffer.setTextColor(TFT_WHITE, TFT_BLACK, true);
-  buffer.print("TostiReflow V2 - v" FIRMWARE_VERSION);
-  buffer.print(" | ");
-  buffer.print("Top: ");
-  if (avgTempTop < 30.0) buffer.setTextColor(TFT_CYAN, TFT_BLACK, true);
-  else if (avgTempTop < 60.0) buffer.setTextColor(TFT_GREEN, TFT_BLACK, true);
-  else if (avgTempTop < 150.0) buffer.setTextColor(TFT_YELLOW, TFT_BLACK, true);
-  else buffer.setTextColor(TFT_RED, TFT_BLACK, true);
+  topBar.fillSprite(TFT_BLACK);
+  topBar.setCursor(5 ,15);
+  topBar.setTextColor(TFT_WHITE, TFT_BLACK, true);
+  topBar.print("TostiReflow V2 - v" FIRMWARE_VERSION);
+  topBar.print(" | ");
+  topBar.print("Top: ");
+  if (avgTempTop < 30.0) topBar.setTextColor(TFT_CYAN, TFT_BLACK, true);
+  else if (avgTempTop < 60.0) topBar.setTextColor(TFT_GREEN, TFT_BLACK, true);
+  else if (avgTempTop < 150.0) topBar.setTextColor(TFT_YELLOW, TFT_BLACK, true);
+  else topBar.setTextColor(TFT_RED, TFT_BLACK, true);
 
-  buffer.print(avgTempTop, 1);  
+  topBar.print(avgTempTop, 1);
 
-  buffer.setTextColor(TFT_WHITE, TFT_BLACK, true);
-  buffer.print("C | Bottom: ");
+  topBar.setTextColor(TFT_WHITE, TFT_BLACK, true);
+  topBar.print("C | Bottom: ");
 
-  if (avgTempBottom < 30.0) buffer.setTextColor(TFT_CYAN, TFT_BLACK, true);
-  else if (avgTempBottom < 60.0) buffer.setTextColor(TFT_GREEN, TFT_BLACK, true);
-  else if (avgTempBottom < 150.0) buffer.setTextColor(TFT_YELLOW, TFT_BLACK, true);
-  else buffer.setTextColor(TFT_RED, TFT_BLACK, true);
-  buffer.print(avgTempBottom, 1);
+  if (avgTempBottom < 30.0) topBar.setTextColor(TFT_CYAN, TFT_BLACK, true);
+  else if (avgTempBottom < 60.0) topBar.setTextColor(TFT_GREEN, TFT_BLACK, true);
+  else if (avgTempBottom < 150.0) topBar.setTextColor(TFT_YELLOW, TFT_BLACK, true);
+  else topBar.setTextColor(TFT_RED, TFT_BLACK, true);
+  topBar.print(avgTempBottom, 1);
 
-  buffer.setTextColor(TFT_WHITE, TFT_BLACK, true);
-  buffer.print("C");
+  topBar.setTextColor(TFT_WHITE, TFT_BLACK, true);
+  topBar.print("C");
 
-  buffer.fillRect(0, DRAW_TOP, DRAW_LEFT, DRAW_HEIGHT, TFT_BLACK); // left margin
+  
+  leftBar.fillSprite(TFT_BLACK);
 
-  buffer.drawRect(0, DRAW_TOP, DRAW_LEFT, DRAW_LEFT, TFT_YELLOW);
+  leftBar.drawRect(2,2, DRAW_LEFT - 4, DRAW_LEFT - 4, TFT_YELLOW);
   // fan indicator
   if (fanState)
-    buffer.fillRect(2, DRAW_TOP+2, DRAW_LEFT - 4, DRAW_LEFT - 4, TFT_YELLOW);
+    leftBar.fillRect(4, 4, DRAW_LEFT - 8, DRAW_LEFT - 8, TFT_YELLOW);
   
   // PID output indicator
-  int halfRemainingHeight = (SCREEN_HEIGHT - DRAW_TOP - DRAW_LEFT) / 2; // half of the remaining height in the box
+  int halfRemainingHeight = DRAW_HEIGHT / 2; // half of the remaining height in the box
 
-  buffer.drawRect(0, DRAW_TOP + DRAW_LEFT, DRAW_LEFT, halfRemainingHeight, TFT_BLUE);
-  int pidHeightT = (int)(OutputT * halfRemainingHeight);
-  buffer.fillRect(2, DRAW_TOP + DRAW_LEFT + halfRemainingHeight - pidHeightT, DRAW_LEFT - 2, pidHeightT, TFT_BLUE);
+  leftBar.drawRect(2, DRAW_LEFT, DRAW_LEFT - 4, halfRemainingHeight - 2, TFT_BLUE);
+  int pidHeightT = (int)(OutputT * halfRemainingHeight - 2);
+  leftBar.fillRect(4, DRAW_LEFT + halfRemainingHeight - pidHeightT, DRAW_LEFT - 8, pidHeightT - 2, TFT_BLUE);
 
-  buffer.drawRect(0, DRAW_TOP + DRAW_LEFT + halfRemainingHeight, DRAW_LEFT, halfRemainingHeight, TFT_GREEN);
-  int pidHeightB = (int)(OutputB * halfRemainingHeight);
-  buffer.fillRect(2, DRAW_TOP + DRAW_LEFT + halfRemainingHeight + halfRemainingHeight - pidHeightB, DRAW_LEFT - 2, pidHeightB, TFT_GREEN);
-
-  if (currentPage != nullptr) {
-    currentPage->Draw();
+  leftBar.drawRect(2, DRAW_LEFT + halfRemainingHeight, DRAW_LEFT - 4, halfRemainingHeight, TFT_GREEN);
+  int pidHeightB = (int)(OutputB * halfRemainingHeight - 2);
+  leftBar.fillRect(4, DRAW_LEFT + halfRemainingHeight + halfRemainingHeight - pidHeightB, DRAW_LEFT - 8, pidHeightB, TFT_GREEN);
+  
+  if (xSemaphoreTake(SPI_Mutex, portMAX_DELAY) == pdTRUE) {
+    leftBar.pushSprite(0, DRAW_TOP);
+    topBar.pushSprite(0, 0);
+    xSemaphoreGive(SPI_Mutex);
   }
-
-  screen.pushToSprite(&buffer, DRAW_LEFT, DRAW_TOP); // draw screen below top bar
-  // write the buffer to the screen
-  buffer.pushSprite(0,0);
-
 }
 
 // Handles touchscreen input and updates touch state variables
 void HandleTouch(){
-  if (millis() - lastPoll < pollingTime) return;
-  lastPoll = millis();
 
   wasTouched = isTouched;
   uint16_t x, y;
-  isTouched = tft.getTouch(&x, &y);
+  
+  if (xSemaphoreTake(SPI_Mutex, portMAX_DELAY) == pdTRUE) {
+    isTouched = tft.getTouch(&x, &y);
+    xSemaphoreGive(SPI_Mutex);
+  }
 
   if (isTouched) {
       
@@ -541,21 +660,33 @@ void HandleTouch(){
     if (!wasTouched) {
       startX = lastX;
       startY = lastY;
+
+      xTaskCreatePinnedToCore(
+        [] (void* param) {
+          analogWriteFrequency(1000);
+          analogWrite(BUZZER_PIN, 2048);
+          vTaskDelay(200 / portTICK_PERIOD_MS);
+          analogWrite(BUZZER_PIN, 0);
+          analogWriteFrequency(5000);
+          vTaskDelete(NULL);
+        },
+        "Beep", 10000, NULL, 1, NULL, 0
+      );
+      
       if (currentPage != nullptr) {
-        currentPage->OnTouch(lastX, lastY);
+        currentPage->OnTouch(lastX - DRAW_LEFT, lastY - DRAW_TOP);
       }
     }
     // Continuous touch
-    else {
-      if (currentPage != nullptr) {
-        currentPage->UpdateTouch(lastX, lastY);
-      }
+    else if (currentPage != nullptr) {
+      currentPage->UpdateTouch(lastX - DRAW_LEFT, lastY - DRAW_TOP);
     }
+    
   }
   // Falling edge
   else if (wasTouched) {
     if (currentPage != nullptr) {
-      currentPage->OnRelease();
+      currentPage->OnRelease(lastX - DRAW_LEFT, lastY - DRAW_TOP);
     }
   }
   // Not touched
@@ -679,7 +810,7 @@ void DisplaySafeMode(){
   analogWriteFrequency(1000);
 
   analogWrite(BUZZER_PIN, 2048);
-  delay(2000);
+  delay(500);
   analogWrite(BUZZER_PIN, 0);
 
   analogWriteFrequency(5000);

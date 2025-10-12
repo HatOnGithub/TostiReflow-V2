@@ -20,9 +20,9 @@
 #define BUZZER_PIN 18
 
 // Settings
-#define POLLING_RATE 100 // in Hz
+#define POLLING_RATE 50 // in Hz
 
-#define REFRESH_RATE 5  // in Hz or FPS (same thing)
+#define REFRESH_RATE 20  // in Hz or FPS (same thing)
 
 #define TEMP_SAMPLES 5 // Number of samples to average for temperature reading
 #define TEMP_SAMPLE_RATE 20 // in Hz, how often to sample temperature for averaging
@@ -47,11 +47,14 @@
 #define SCREEN_WIDTH 480
 #define SCREEN_HEIGHT 320
 
-#define DRAW_TOP 25 // Height of the top bar
-#define DRAW_LEFT 25 // Left margin for the drawable area
+#define DRAW_TOP 30 // Height of the top bar
+#define DRAW_LEFT 30 // Left margin for the drawable area
 
-#define DRAW_WIDTH 455 // Width of the drawable area
-#define DRAW_HEIGHT 295 // Height of the drawable area (excluding top bar)
+#define DRAW_WIDTH 450 // Width of the drawable area
+#define DRAW_HEIGHT 290 // Height of the drawable area (excluding top bar)
+
+#define SETTING_SUBPAGES 2 // number of subpages in the settings page
+#define NETWORK_SUBPAGES 1 // number of subpages in the network settings page
 
 #define TOP 0
 #define BOTTOM 1

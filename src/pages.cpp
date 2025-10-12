@@ -7,212 +7,487 @@
 
 #include <TFT_eSPI.h>       // Hardware-specific library
 #include "config.h"
+#include "pages.h"
 
 
 // all pages inherit from the abstract Page class
 
-class Page {
-  public:
-    virtual void Update() = 0;
-    virtual void Draw() = 0;
-    virtual void OnTouch(uint16_t x, uint16_t y) = 0;
-    virtual void UpdateTouch(uint16_t x, uint16_t y) = 0;
-    virtual void OnRelease() = 0;
-};
+class Page;
 
+// Forward declarations of all page classes for linking
+class HomePage;
+class ProfilePage;
+class MonitorPage;
+class SettingsPage;
+class PIDSettingsPage;
+class NetworkSettingsPage;
+class WiFiSettingsPage;
 
-// Main navigation page
-class HomePage : public Page {
-  public:
-    void Update() override {
-      // Update logic for HomePage
+// =========================================================================================================
+//                                    Home Page - main navigation page
+// =========================================================================================================
+
+void HomePage::LinkPages(ProfilePage *profilePage, SettingsPage *settingsPage, MonitorPage *monitorPage){
+  // Link the pages together
+  linkedProfilePage = profilePage;
+  linkedSettingsPage = settingsPage;
+  linkedMonitorPage = monitorPage;
+}
+
+void HomePage::Update() {
+  // Nothing to update on the home page for now
+  if (firstDraw){
+    DrawStatic();
+    firstDraw = false;
+  }
+}
+
+void HomePage::DrawStatic(){
+  // Draw static elements that don't change often
+
+  screen->fillSprite(darkestGrey);
+  screen->setTextColor(TFT_WHITE);
+
+  // Draw the home page UI elements
+
+  // Title
+  screen->setTextSize(2);
+  screen->setCursor(95, 130);
+  screen->println("Tosti Reflow V2");
+  screen->setTextSize(1);
+  screen->setCursor(145, 160);
+  screen->println("by JTD Chen, v" FIRMWARE_VERSION);
+
+  // Buttons for navigation
+  // Monitor Button
+  screen->fillRoundRect(monitorX, monitorY, monitorWidth, monitorHeight, 5, darkerGrey);
+  screen->setCursor(45, 255);
+  screen->println("Monitor");
+
+  // Profile Button
+  screen->fillRoundRect(profileX, profileY, profileWidth, profileHeight, 5, darkerGrey);
+  screen->setCursor(200, 255);
+  screen->println("Profile");
+
+  // Settings Button
+  screen->fillRoundRect(settingsX, settingsY, settingsWidth, settingsHeight, 5, darkerGrey);
+  screen->setCursor(340, 255);
+  screen->println("Settings");
+
+  Push();
+}
+
+void HomePage::OnTouch(uint16_t x, uint16_t y) {
+  // Check if touching any of the buttons
+  wasTouchingProfile = (x >= profileX && x <= profileX + profileWidth && y >= profileY && y <= profileY + profileHeight);
+  wasTouchingSettings = (x >= settingsX && x <= settingsX + settingsWidth && y >= settingsY && y <= settingsY + settingsHeight);
+  wasTouchingMonitor = (x >= monitorX && x <= monitorX + monitorWidth && y >= monitorY && y <= monitorY + monitorHeight);
+
+  if (wasTouchingProfile || wasTouchingSettings || wasTouchingMonitor) {
+    // Redraw buttons with highlight
+    if (wasTouchingProfile) {
+      screen->fillRoundRect(profileX, profileY, profileWidth, profileHeight, 5, highlightGrey);
+      screen->setCursor(200, 255);
+      screen->println("Profile");
+      Push(profileX, profileY, profileWidth, profileHeight);
+    } 
+    if (wasTouchingSettings) {
+      screen->fillRoundRect(settingsX, settingsY, settingsWidth, settingsHeight, 5, highlightGrey);
+      screen->setCursor(340, 255);
+      screen->println("Settings");
+      Push(settingsX, settingsY, settingsWidth, settingsHeight);
+    } 
+    if (wasTouchingMonitor) {
+      screen->fillRoundRect(monitorX, monitorY, monitorWidth, monitorHeight, 5, highlightGrey);
+      screen->setCursor(45, 255);
+      screen->println("Monitor");
+      Push(monitorX, monitorY, monitorWidth, monitorHeight);
+    } 
+  }
+}
+
+void HomePage::UpdateTouch(uint16_t x, uint16_t y) {
+  
+}
+
+void HomePage::OnRelease(uint16_t x, uint16_t y) {
+
+  touchingProfile = (x >= profileX && x <= profileX + profileWidth && y >= profileY && y <= profileY + profileHeight);
+  touchingSettings = (x >= settingsX && x <= settingsX + settingsWidth && y >= settingsY && y <= settingsY + settingsHeight);
+  touchingMonitor = (x >= monitorX && x <= monitorX + monitorWidth && y >= monitorY && y <= monitorY + monitorHeight);
+
+  // If touch is released within a button, navigate to that page
+  if (!touchingProfile && !touchingSettings && !touchingMonitor) {
+
+    if (wasTouchingProfile){
+      // Redraw Profile button to normal
+      screen->fillRoundRect(profileX, profileY, profileWidth, profileHeight, 5, darkerGrey);
+      screen->setCursor(200, 255);
+      screen->println("Profile");
+      Push(profileX, profileY, profileWidth, profileHeight);
     }
 
-    void Draw() override {
-      
+    if (wasTouchingMonitor){
+      // Redraw Monitor button to normal
+      screen->fillRoundRect(monitorX, monitorY, monitorWidth, monitorHeight, 5, darkerGrey);
+      screen->setCursor(45, 255);
+      screen->println("Monitor");
+      Push(monitorX, monitorY, monitorWidth, monitorHeight);
     }
 
-    void OnTouch(uint16_t x, uint16_t y) override {
-      // Handle touch start on HomePage
+    if (wasTouchingSettings){
+      // Redraw Settings button to normal
+      screen->fillRoundRect(settingsX, settingsY, settingsWidth, settingsHeight, 5, darkerGrey);
+      screen->setCursor(340, 255);
+      screen->println("Settings");
+      Push(settingsX, settingsY, settingsWidth, settingsHeight);
     }
 
-    void UpdateTouch(uint16_t x, uint16_t y) override {
-      // Handle touch move on HomePage
-    }
+    return; // Not touching any button
+  }
 
-    void OnRelease() override {
-      // Handle touch release on HomePage
-    }
+  if (touchingProfile) {
+    SwitchTo(linkedProfilePage);
+  } else if (touchingSettings) {
+    SwitchTo(linkedSettingsPage);
+  } else if (touchingMonitor) {
+    SwitchTo(linkedMonitorPage);
+  }
 
-};
+  // Reset touch states
+  touchingProfile = false;
+  touchingSettings = false;
+  touchingMonitor = false;
+}
 
-// Page for selecting and running profiles
-class ProfilePage : public Page {
-  public:
-    ProfilePage() {
-      // Constructor logic for ProfilePage
-    }
-    void Update() override {
-      // Update logic for ProfilePage
-    }
 
-    void Draw() override {
-      // Drawing logic for ProfilePage
-    }
+// =========================================================================================================
+//                            Profile Page - for selecting and running profiles
+// =========================================================================================================
+void ProfilePage::LinkPages(HomePage* homePage) {
+  // Link the pages together
+  linkedHomePage = homePage;
+}
+void ProfilePage::Update() {
+  // Update logic for ProfilePage
+  if (firstDraw){
+    DrawStatic();
+    firstDraw = false;
+  }
+}
 
-    void OnTouch(uint16_t x, uint16_t y) override {
-      // Handle touch start on ProfilePage
-    }
+void ProfilePage::DrawStatic(){
+  // Draw static elements that don't change often
 
-    void UpdateTouch(uint16_t x, uint16_t y) override {
-      // Handle touch move on ProfilePage
-    }
+  screen->fillSprite(darkestGrey);
+  screen->setTextColor(TFT_WHITE);
 
-    void OnRelease() override {
-      // Handle touch release on ProfilePage
-    }
+  // Draw the profile page UI elements
 
-};
+  // Title
+  screen->setTextSize(2);
+  screen->setCursor(145, 130);
+  screen->println("Profile Page");
+  screen->setTextSize(1);
+  screen->setCursor(95, 160);
+  screen->println("Select and run profiles");
 
-// Page for showing the running a profile and showing progress
-class MonitorPage : public Page {
-  public:
-    MonitorPage() {
-      // Constructor logic for MonitorPage
-    }
-    void Update() override {
-      // Update logic for MonitorPage
-    }
+  // Back Button
+  screen->fillRoundRect(10, 10, 60, 30, 5, darkerGrey);
+  screen->setCursor(25, 25);
+  screen->println("Back");
 
-    void Draw() override {
-      // Drawing logic for MonitorPage
-    }
+  Push();
+}
 
-    void OnTouch(uint16_t x, uint16_t y) override {
-      // Handle touch start on MonitorPage
-    }
+void ProfilePage::OnTouch(uint16_t x, uint16_t y) {
+  // Handle touch start on ProfilePage
+  SwitchTo(linkedHomePage);
+}
 
-    void UpdateTouch(uint16_t x, uint16_t y) override {
-      // Handle touch move on MonitorPage
-    }
+void ProfilePage::UpdateTouch(uint16_t x, uint16_t y) {
+  // Handle touch move on ProfilePage
+}
 
-    void OnRelease() override {
-      // Handle touch release on MonitorPage
-    }
+void ProfilePage::OnRelease(uint16_t x, uint16_t y) {
+  // Handle touch release on ProfilePage
+}
 
-};
 
-// Page for showing submenus for different settings
-class SettingsPage : public Page {
-  public:
-    SettingsPage() {
-      // Constructor logic for SettingsPage
-    }
-    void Update() override {
-      // Update logic for SettingsPage
-    }
 
-    void Draw() override {
-      // Drawing logic for SettingsPage
-    }
+// =========================================================================================
+//           Monitor Page - for showing the running a profile and showing progress
+// =========================================================================================
+void MonitorPage::LinkPages(HomePage* homePage) {
+  // Link the pages together
+  linkedHomePage = homePage;
+}
+void MonitorPage::Update() {
+  // Update logic for MonitorPage
+  if (firstDraw){
+    DrawStatic();
+    firstDraw = false;
+  }
+}
 
-    void OnTouch(uint16_t x, uint16_t y) override {
-      // Handle touch start on SettingsPage
-    }
+void MonitorPage::DrawStatic() {
+  // Draw static elements that don't change often
 
-    void UpdateTouch(uint16_t x, uint16_t y) override {
-      // Handle touch move on SettingsPage
-    }
+  screen->fillSprite(darkestGrey);
+  screen->setTextColor(TFT_WHITE);
 
-    void OnRelease() override {
-      // Handle touch release on SettingsPage
-    }
+  // Draw the monitor page UI elements
 
-};
+  // Title
+  screen->setTextSize(2);
+  screen->setCursor(140, 130);
+  screen->println("Monitor");
+  screen->setTextSize(1);
+  screen->setCursor(95, 160);
+  screen->println("Profile: None");
 
-// Page for setting PID parameters Kp, Ki, and Kd, mainly for tuning
-class PIDSettingsPage : public Page {
-  public:
-    PIDSettingsPage() {
-      // Constructor logic for PIDSettingsPage
-    }
+  
+  // Back Button
+  screen->fillRoundRect(10, 10, 60, 30, 5, darkerGrey);
+  screen->setCursor(25, 25);
+  screen->println("Back");
 
-    void Update() override {
-      // Update logic for PIDSettingsPage
-    }
+  Push();
+}
 
-    void Draw() override {
-      // Drawing logic for PIDSettingsPage
-    }
+void MonitorPage::OnTouch(uint16_t x, uint16_t y) {
+  SwitchTo(linkedHomePage);
+}
 
-    void OnTouch(uint16_t x, uint16_t y) override {
-      // Handle touch start on PIDSettingsPage
-    }
+void MonitorPage::UpdateTouch(uint16_t x, uint16_t y) {
+  // Handle touch move on MonitorPage
+}
 
-    void UpdateTouch(uint16_t x, uint16_t y) override {
-      // Handle touch move on PIDSettingsPage
-    }
+void MonitorPage::OnRelease(uint16_t x, uint16_t y) {
+  // Handle touch release on MonitorPage
+}
 
-    void OnRelease() override {
-      // Handle touch release on PIDSettingsPage
-    }
 
-};
+// =========================================================================================
+//             Settings Page - for showing submenus for different settings
+// =========================================================================================
 
-// Page for setting WiFi SSID and Password (and possibly other network settings in the future like MQTT, BT, etc)
-class NetworkSettingsPage : public Page {
-  public:
-    NetworkSettingsPage() {
-      // Constructor logic for NetworkSettingsPage
-    }
+void SettingsPage::LinkPages(HomePage* homePage, String settingNames[], Page* subPages[], int numSubPages) {
+  // Link the pages together
+  linkedHomePage = homePage;
+  for (int i = 0; i < numSubPages; i++) {
+    this->subPages[i] = subPages[i];
+    this->settingNames[i] = settingNames[i];
+  }
+}
 
-    void Update() override {
-      // Update logic for NetworkSettingsPage
-    }
+void SettingsPage::Update() {
+  // Update logic for SettingsPage
+  if (firstDraw){
+    DrawStatic();
+    firstDraw = false;
+  }
+}
 
-    void Draw() override {
-      // Drawing logic for NetworkSettingsPage
-    }
+void SettingsPage::DrawStatic(){
+  // Draw static elements that don't change often
 
-    void OnTouch(uint16_t x, uint16_t y) override {
-      // Handle touch start on NetworkSettingsPage
-    }
+  screen->fillSprite(darkestGrey);
+  screen->setTextColor(TFT_WHITE);
 
-    void UpdateTouch(uint16_t x, uint16_t y) override {
-      // Handle touch move on NetworkSettingsPage
-    }
+  // Draw the settings page UI elements
 
-    void OnRelease() override {
-      // Handle touch release on NetworkSettingsPage
-    }
+  // Title
+  screen->setTextSize(2);
+  screen->setCursor(130, 130);
+  screen->println("Settings");
+  screen->setTextSize(1);
+  screen->setCursor(95, 160);
+  screen->println("Configure system settings");
 
-};
+  // Back Button
+  screen->fillRoundRect(10, 10, 60, 30, 5, darkerGrey);
+  screen->setCursor(25, 25);
+  screen->println("Back");
 
-// Page for setting WiFi SSID and Password
-class WiFiSettingsPage : public Page {
-  public:
-    WiFiSettingsPage() {
-      // Constructor logic for WiFiSettingsPage
-    }
+  Push();
+}
 
-    void Update() override {
-      // Update logic for WiFiSettingsPage
-    }
+void SettingsPage::OnTouch(uint16_t x, uint16_t y) {
+  // Handle touch start on SettingsPage
+  SwitchTo(linkedHomePage);
+}
 
-    void Draw() override {
-      // Drawing logic for WiFiSettingsPage
-    }
+void SettingsPage::UpdateTouch(uint16_t x, uint16_t y) {
+  // Handle touch move on SettingsPage
+}
 
-    void OnTouch(uint16_t x, uint16_t y) override {
-      // Handle touch start on WiFiSettingsPage
-    }
+void SettingsPage::OnRelease(uint16_t x, uint16_t y) {
+  // Handle touch release on SettingsPage
+}
 
-    void UpdateTouch(uint16_t x, uint16_t y) override {
-      // Handle touch move on WiFiSettingsPage
-    }
 
-    void OnRelease() override {
-      // Handle touch release on WiFiSettingsPage
-    }
+// =========================================================================================
+//              PID Settings Page - for setting PID parameters and tuning
+// =========================================================================================
 
-};
+void PIDSettingsPage::LinkPages(SettingsPage* settingsPage) {
+  // Link the pages together
+  linkedSettingsPage = settingsPage;
+}
+
+void PIDSettingsPage::Update() {
+  // Update logic for PIDSettingsPage
+  if (firstDraw){
+    DrawStatic();
+    firstDraw = false;
+  }
+}
+
+void PIDSettingsPage::DrawStatic(){
+  // Draw static elements that don't change often
+
+  screen->fillSprite(darkestGrey);
+  screen->setTextColor(TFT_WHITE);
+
+  // Draw the PID settings page UI elements
+
+  // Title
+  screen->setTextSize(2);
+  screen->setCursor(120, 130);
+  screen->println("PID Settings");
+  screen->setTextSize(1);
+  screen->setCursor(95, 160);
+  screen->println("Set PID parameters");
+
+  // Back Button
+  screen->fillRoundRect(10, 10, 60, 30, 5, darkerGrey);
+  screen->setCursor(25, 25);
+  screen->println("Back");
+
+  Push();
+}
+
+void PIDSettingsPage::OnTouch(uint16_t x, uint16_t y) {
+  // Handle touch start on PIDSettingsPage
+}
+
+void PIDSettingsPage::UpdateTouch(uint16_t x, uint16_t y) {
+  // Handle touch move on PIDSettingsPage
+}
+
+void PIDSettingsPage::OnRelease(uint16_t x, uint16_t y) {
+  // Handle touch release on PIDSettingsPage
+}
+
+
+// =========================================================================================
+//          Network Settings Page - Navigation for setting network related settings
+// =========================================================================================
+
+void NetworkSettingsPage::LinkPages(SettingsPage* settingsPage, String settingNames[], Page* subPages[], int numSubPages) {
+  // Link the pages together
+  linkedSettingsPage = settingsPage;
+  for (int i = 0; i < numSubPages; i++) {
+    this->subPages[i] = subPages[i];
+    this->settingNames[i] = settingNames[i];
+  }
+}
+
+void NetworkSettingsPage::Update() {
+  // Update logic for NetworkSettingsPage
+  if (firstDraw){
+    DrawStatic();
+    firstDraw = false;
+  }
+}
+
+void NetworkSettingsPage::DrawStatic(){
+  // Draw static elements that don't change often
+
+  screen->fillSprite(darkestGrey);
+  screen->setTextColor(TFT_WHITE);
+
+  // Draw the network settings page UI elements
+
+  // Title
+  screen->setTextSize(2);
+  screen->setCursor(110, 130);
+  screen->println("Network Settings");
+  screen->setTextSize(1);
+  screen->setCursor(95, 160);
+  screen->println("Configure network settings");
+
+  // Back Button
+  screen->fillRoundRect(10, 10, 60, 30, 5, darkerGrey);
+  screen->setCursor(25, 25);
+  screen->println("Back");
+
+  Push();
+}
+
+void NetworkSettingsPage::OnTouch(uint16_t x, uint16_t y) {
+  // Handle touch start on NetworkSettingsPage
+}
+
+void NetworkSettingsPage::UpdateTouch(uint16_t x, uint16_t y) {
+  // Handle touch move on NetworkSettingsPage
+}
+
+void NetworkSettingsPage::OnRelease(uint16_t x, uint16_t y) {
+  // Handle touch release on NetworkSettingsPage
+}
+
+// =========================================================================================
+//              WiFi Settings Page - for setting WiFi SSID and Password
+// =========================================================================================
+
+void WiFiSettingsPage::LinkPages(NetworkSettingsPage* networkSettingsPage) {
+  // Link the pages together
+  linkedNetworkSettingsPage = networkSettingsPage;
+}
+
+void WiFiSettingsPage::Update() {
+  // Update logic for WiFiSettingsPage
+  if (firstDraw){
+    DrawStatic();
+    firstDraw = false;
+  }
+}
+
+void WiFiSettingsPage::DrawStatic(){
+  // Draw static elements that don't change often
+
+  screen->fillSprite(darkestGrey);
+  screen->setTextColor(TFT_WHITE);
+
+  // Draw the WiFi settings page UI elements
+
+  // Title
+  screen->setTextSize(2);
+  screen->setCursor(120, 130);
+  screen->println("WiFi Settings");
+  screen->setTextSize(1);
+  screen->setCursor(95, 160);
+  screen->println("Set SSID and Password");
+
+  // Back Button
+  screen->fillRoundRect(10, 10, 60, 30, 5, darkerGrey);
+  screen->setCursor(25, 25);
+  screen->println("Back");
+
+  Push();
+}
+
+void WiFiSettingsPage::OnTouch(uint16_t x, uint16_t y) {
+  // Handle touch start on WiFiSettingsPage
+  
+}
+
+void WiFiSettingsPage::UpdateTouch(uint16_t x, uint16_t y) {
+  // Handle touch move on WiFiSettingsPage
+}
+
+void WiFiSettingsPage::OnRelease(uint16_t x, uint16_t y) {
+  // Handle touch release on WiFiSettingsPage
+}
