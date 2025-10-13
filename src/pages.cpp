@@ -52,10 +52,10 @@ void HomePage::DrawStatic(){
 
   // Title
   screen->setTextSize(2);
-  screen->setCursor(95, 130);
+  screen->setCursor(95, 115);
   screen->println("Tosti Reflow V2");
   screen->setTextSize(1);
-  screen->setCursor(145, 160);
+  screen->setCursor(145, 145);
   screen->println("by JTD Chen, v" FIRMWARE_VERSION);
 
   // Buttons for navigation

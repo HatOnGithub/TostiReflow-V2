@@ -7,6 +7,7 @@
 #include <PID_v1.h>
 #include "LittleFS.h"
 #include <EEPROM.h>
+#include "time.h"
 
 #include <WiFi.h>
 #include <WebServer.h>
@@ -15,6 +16,7 @@
 #include <ArduinoOTA.h>
 
 #include "pages.h"
+#include "profile.h"
 #include "config.h"
 #include "secret.h"
 
@@ -42,6 +44,7 @@ void OnConnect();
 void DisplayError(String message);
 void DisplaySafeMode();
 void Beep();
+void Beep(int duration);
 
 /*
 ===============================================================================================
@@ -79,6 +82,14 @@ unsigned long lastLoopStart = 0, lastLoopEnd = 0, loopDuration = 0;
 // Wireless
 const char* ssid = SSID;
 const char* password = PSWD;
+const char* ntpServer = "pool.ntp.org";
+const long gmtOffset_sec = 3600; // GMT +1
+const int daylightOffset_sec = 3600;
+
+bool validNTP = false;
+unsigned long lastNTPCheck = -60000, NTPCheckInterval = 60000; // check every minute
+tm timeinfo;
+
 
 WebServer server(80);
 String header;
@@ -137,31 +148,6 @@ bool profileLoaded = false, profileRunning = false;
 ===============================================================================================
 */
 
-class ProfileStep {
-  public:
-    // Target temperature for this step
-    double finalTempT; 
-    double finalTempB;
-
-    // Duration of this step in milliseconds, 
-    // calculated by Init() based on this step's behavior and the previous step's final temperature
-    unsigned long duration; 
-    
-    // given the final target temperature of the last step, start this step
-    virtual void Init(double endTempT, double endTempB) = 0;
-
-    // Reset any internal variables to prepare for a new profile run
-    virtual void Start() = 0;
-
-    // update the setpoints based on the elapsed time and this step's behavior
-    virtual void Update(double* SetpointT, double* SetpointB) = 0;
-
-    // Signal that the next step should start
-    virtual bool IsComplete() = 0;
-
-    // Draw itself on a graph sprite at position x,y with given step sizes (1 pixel = stepX in time, 1 pixel = stepY in temperature)
-    virtual void DrawOnGraph(TFT_eSprite* graphSprite, uint16_t startX, uint16_t startY, double stepX, double stepY) = 0;
-};
 
 // =================================================================================================
 //                                    Page class instances
@@ -187,6 +173,7 @@ TaskHandle_t WebServerTaskHandle;
 TaskHandle_t DrawTaskHandle;
 TaskHandle_t TouchTaskHandle;
 TaskHandle_t TimeCriticalTasksHandle;
+TaskHandle_t beepHandle;
 
 void WebServerTask( void * parameter ){
   for(;;){
@@ -320,6 +307,9 @@ void setup(){
 
   delay(500);
 
+  // ======== Get the time ==========
+  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+
   // ====== Setup Sprite Buffers =======
   Serial0.println("Sprite buffers init");
   tft.println("Sprite buffers initializing...");
@@ -378,7 +368,7 @@ void setup(){
 
   xTaskCreatePinnedToCore(
     TimeCriticalTasks,          /* Function to implement the task */
-    "Temperature Task",       /* Name of the task */
+    "TimeCritical Task",       /* Name of the task */
     10000,            /* Stack size in words */
     NULL,             /* Task input parameter */
     3,                /* Priority of the task */
@@ -500,9 +490,11 @@ void SetupOTA(){
         vTaskSuspend(DrawTaskHandle);
         vTaskSuspend(TouchTaskHandle);
         vTaskSuspend(TimeCriticalTasksHandle);
+        vTaskSuspend(WebServerTaskHandle);
         digitalWrite(RELAY_B, LOW);
         digitalWrite(RELAY_T, LOW);
         digitalWrite(RELAY_F, LOW);
+        safemode = true;
       }
 
       tft.fillScreen(TFT_BLACK);
@@ -586,15 +578,36 @@ void SetupPID(){
 ===============================================================================================
 */
 
-
 void DrawUI(){
 
   // Use buffer to draw the UI
 
   // Top bar with temperatures
   topBar.fillSprite(TFT_BLACK);
-  topBar.setCursor(5 ,15);
+  topBar.setCursor(0 ,15);
   topBar.setTextColor(TFT_WHITE, TFT_BLACK, true);
+  
+  if (millis() - lastNTPCheck > NTPCheckInterval) {
+    if (getLocalTime(&timeinfo)) {
+      validNTP = true;
+    } else {
+      validNTP = false;
+    }
+    lastNTPCheck = millis();
+  }
+
+  if (validNTP) {
+    if ((millis() - lastNTPCheck) % 1000 < 200) {
+      topBar.print(&timeinfo, "%H:%M");
+    }
+    else{
+      topBar.print(&timeinfo, "%H.%M");
+    }
+  } else {
+    topBar.print("??:??");
+  }
+
+  topBar.setCursor(50, 15);
   topBar.print("TostiReflow V2 - v" FIRMWARE_VERSION);
   topBar.print(" | ");
   topBar.print("Top: ");
@@ -843,15 +856,21 @@ void DisplaySafeMode(){
 }
 
 void Beep(){
-    xTaskCreatePinnedToCore(
-      [] (void* param) {
-        analogWriteFrequency(1000);
-        analogWrite(BUZZER_PIN, 2048);
-        vTaskDelay(200 / portTICK_PERIOD_MS);
-        analogWrite(BUZZER_PIN, 0);
-        analogWriteFrequency(5000);
-        vTaskDelete(NULL);
-      },
-      "Beep", 10000, NULL, 1, NULL, 0
-    );
+  Beep(200);
 }
+
+void Beep(int duration){
+  xTaskCreatePinnedToCore(
+    [] (void* param) {
+      int duration = *((int*)param);
+      analogWriteFrequency(1000);
+      analogWrite(BUZZER_PIN, 2048);
+      vTaskDelay(duration / portTICK_PERIOD_MS);
+      analogWrite(BUZZER_PIN, 0);
+      analogWriteFrequency(5000);
+      vTaskDelete(beepHandle);
+    },
+    "Beep", 10000, &duration, 1, &beepHandle, 0
+  );
+}
+

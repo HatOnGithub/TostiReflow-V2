@@ -1,0 +1,9 @@
+N Preheating
+L 150 R1.5
+N Soaking
+L 175 T90
+N Rampup and Reflow
+I 250 T60
+N Cooldown
+B
+I 0 R-4
