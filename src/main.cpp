@@ -41,6 +41,7 @@ void OnConnect();
 
 void DisplayError(String message);
 void DisplaySafeMode();
+void Beep();
 
 /*
 ===============================================================================================
@@ -213,6 +214,8 @@ void TimeCriticalTasks( void * parameter ){
   for(;;){
     SampleTemperatures();
     SlowPWM();
+
+    // prevent watchdog
     vTaskDelay( 10  / portTICK_PERIOD_MS);
   }
 }
@@ -661,17 +664,7 @@ void HandleTouch(){
       startX = lastX;
       startY = lastY;
 
-      xTaskCreatePinnedToCore(
-        [] (void* param) {
-          analogWriteFrequency(1000);
-          analogWrite(BUZZER_PIN, 2048);
-          vTaskDelay(200 / portTICK_PERIOD_MS);
-          analogWrite(BUZZER_PIN, 0);
-          analogWriteFrequency(5000);
-          vTaskDelete(NULL);
-        },
-        "Beep", 10000, NULL, 1, NULL, 0
-      );
+      Beep();
       
       if (currentPage != nullptr) {
         currentPage->OnTouch(lastX - DRAW_LEFT, lastY - DRAW_TOP);
@@ -751,7 +744,7 @@ void GetTemperature(int from){
 
 void SlowPWM(){
 
-  digitalWrite(RELAY_F, fanState ? HIGH : LOW); // Fan always on when heating
+  digitalWrite(RELAY_F, fanState ? HIGH : LOW);
 
   if (!profileRunning) {
     digitalWrite(RELAY_T, LOW);
@@ -771,6 +764,38 @@ void SlowPWM(){
   if (OutputT > 0) digitalWrite(RELAY_T, HIGH); // update PWM
   if (OutputB > 0) digitalWrite(RELAY_B, HIGH);
 }
+
+
+
+/*
+===============================================================================================
+                                   Webpages and APIs
+===============================================================================================
+*/
+
+void NotFound(){
+  Serial.println("Not Found: " + server.uri());
+  server.send(404, "text/plain", "Not Found");
+}
+
+void OnConnect(){
+  fs::File file = LittleFS.open("/static/index.html", "r");
+  if (!file) {
+    Serial.println("Failed to open file for reading");
+    server.send(404, "text/plain", "File not found");
+    return;
+  }
+  server.streamFile(file, "text/html");
+  file.close();
+}
+
+
+/*
+===============================================================================================
+                                    Debug Functions
+===============================================================================================
+*/
+
 
 void DisplayError(String message) {
   tft.fillScreen(TFT_BLACK);
@@ -817,27 +842,16 @@ void DisplaySafeMode(){
   
 }
 
-
-
-
-/*
-===============================================================================================
-                                   Webpages and APIs
-===============================================================================================
-*/
-
-void NotFound(){
-  Serial.println("Not Found: " + server.uri());
-  server.send(404, "text/plain", "Not Found");
-}
-
-void OnConnect(){
-  fs::File file = LittleFS.open("/static/index.html", "r");
-  if (!file) {
-    Serial.println("Failed to open file for reading");
-    server.send(404, "text/plain", "File not found");
-    return;
-  }
-  server.streamFile(file, "text/html");
-  file.close();
+void Beep(){
+    xTaskCreatePinnedToCore(
+      [] (void* param) {
+        analogWriteFrequency(1000);
+        analogWrite(BUZZER_PIN, 2048);
+        vTaskDelay(200 / portTICK_PERIOD_MS);
+        analogWrite(BUZZER_PIN, 0);
+        analogWriteFrequency(5000);
+        vTaskDelete(NULL);
+      },
+      "Beep", 10000, NULL, 1, NULL, 0
+    );
 }

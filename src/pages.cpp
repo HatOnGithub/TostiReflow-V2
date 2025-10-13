@@ -192,9 +192,10 @@ void ProfilePage::DrawStatic(){
   screen->setCursor(95, 160);
   screen->println("Select and run profiles");
 
-  // Back Button
-  screen->fillRoundRect(10, 10, 60, 30, 5, darkerGrey);
-  screen->setCursor(25, 25);
+  // Back Button and Header Bar
+  screen->fillRect(60,0, DRAW_WIDTH - 60, 35, darkGrey);
+  screen->fillRoundRect(0, 0, 60, 35, 3, darkerGrey);
+  screen->setCursor(5, 20);
   screen->println("Back");
 
   Push();
@@ -247,9 +248,10 @@ void MonitorPage::DrawStatic() {
   screen->println("Profile: None");
 
   
-  // Back Button
-  screen->fillRoundRect(10, 10, 60, 30, 5, darkerGrey);
-  screen->setCursor(25, 25);
+  // Back Button and Header Bar
+  screen->fillRect(60,0, DRAW_WIDTH - 60, 35, darkGrey);
+  screen->fillRoundRect(0, 0, 60, 35, 3, darkerGrey);
+  screen->setCursor(5, 20);
   screen->println("Back");
 
   Push();
@@ -305,9 +307,10 @@ void SettingsPage::DrawStatic(){
   screen->setCursor(95, 160);
   screen->println("Configure system settings");
 
-  // Back Button
-  screen->fillRoundRect(10, 10, 60, 30, 5, darkerGrey);
-  screen->setCursor(25, 25);
+  // Back Button and Header Bar
+  screen->fillRect(60,0, DRAW_WIDTH - 60, 35, darkGrey);
+  screen->fillRoundRect(0, 0, 60, 35, 3, darkerGrey);
+  screen->setCursor(5, 20);
   screen->println("Back");
 
   Push();
@@ -360,9 +363,10 @@ void PIDSettingsPage::DrawStatic(){
   screen->setCursor(95, 160);
   screen->println("Set PID parameters");
 
-  // Back Button
-  screen->fillRoundRect(10, 10, 60, 30, 5, darkerGrey);
-  screen->setCursor(25, 25);
+  // Back Button and Header Bar
+  screen->fillRect(60,0, DRAW_WIDTH - 60, 35, darkGrey);
+  screen->fillRoundRect(0, 0, 60, 35, 3, darkerGrey);
+  screen->setCursor(5, 20);
   screen->println("Back");
 
   Push();
@@ -418,9 +422,10 @@ void NetworkSettingsPage::DrawStatic(){
   screen->setCursor(95, 160);
   screen->println("Configure network settings");
 
-  // Back Button
-  screen->fillRoundRect(10, 10, 60, 30, 5, darkerGrey);
-  screen->setCursor(25, 25);
+  // Back Button and Header Bar
+  screen->fillRect(60,0, DRAW_WIDTH - 60, 35, darkGrey);
+  screen->fillRoundRect(0, 0, 60, 35, 3, darkerGrey);
+  screen->setCursor(5, 20);
   screen->println("Back");
 
   Push();
@@ -471,9 +476,10 @@ void WiFiSettingsPage::DrawStatic(){
   screen->setCursor(95, 160);
   screen->println("Set SSID and Password");
 
-  // Back Button
-  screen->fillRoundRect(10, 10, 60, 30, 5, darkerGrey);
-  screen->setCursor(25, 25);
+  // Back Button and Header Bar
+  screen->fillRect(60,0, DRAW_WIDTH - 60, 35, darkGrey);
+  screen->fillRoundRect(0, 0, 60, 35, 3, darkerGrey);
+  screen->setCursor(5, 20);
   screen->println("Back");
 
   Push();

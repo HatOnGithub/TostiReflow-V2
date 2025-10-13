@@ -10,6 +10,7 @@ class Page {
       this->screen = screen;
       this->currentPage = currentPage;
       this->spi_mutex = spi_mutex;
+      darkGrey = screen->color565(80, 80, 80);
       darkerGrey = screen->color565(60, 60, 60);
       darkestGrey = screen->color565(30, 30, 30);
       highlightGrey = screen->color565(100, 100, 100);
@@ -35,7 +36,7 @@ class Page {
       newPage->firstDraw = true; // force redraw of the new page
     }
   protected:
-    uint32_t darkerGrey, darkestGrey, highlightGrey;
+    uint32_t darkGrey, darkerGrey, darkestGrey, highlightGrey;
     Page** currentPage; // pointer to the current page being displayed
     TFT_eSprite* screen;
     bool firstDraw = true; // flag to indicate if it's the first time drawing the page
