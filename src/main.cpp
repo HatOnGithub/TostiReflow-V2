@@ -1,3 +1,5 @@
+#pragma region Includes
+
 #include <Arduino.h>
 #include <Esp.h>
 #include <Wire.h>
@@ -14,70 +16,64 @@
 #include <ESPmDNS.h>
 #include <ArduinoJson.h>
 #include <ArduinoOTA.h>
+#include "esp_ota_ops.h"
 
-#include "pages.h"
 #include "profile.h"
 #include "config.h"
+
+// Include WiFi credentials and OTA hash from secret.h
+// To create your own, copy secret_template.h to secret.h and fill in your details
 #include "secret.h"
 
+#pragma endregion Includes
 
-/*
-===============================================================================================
-                                    Function Prototypes
-===============================================================================================
-*/
+// ============================================================================================
+//                                   Function Prototypes
+// ============================================================================================
 
+#pragma region FunctionPrototypes
+
+// Setup functions
+void SetupTFT();
 void SetupOTA();
+void SetupADS();
 void SetupWiFi();
 void SetupWebServer();
 void SetupPID();
 void SetupFS();
 void SetupPages();
+void SetupBuffers();
+void SetupTasks();
+
+// Main loop functions
 void HandleTouch();
 void SampleTemperatures();
 void SlowPWM();
 void DrawUI();
 void GetTemperature(int from);
 
+// Web server functions and API
 void OnConnect();
 
+// Debug functions
 void DisplayError(String message);
 void DisplaySafeMode();
 void Beep();
 void Beep(int duration);
 
-/*
-===============================================================================================
-                                        Class Declarations
-===============================================================================================
-*/
+#pragma endregion FunctionPrototypes
 
-// Abstract profile step class
-class ProfileStep;
+// ============================================================================================
+//                                       Variables
+// ============================================================================================
 
-// ------------- Profile steps for combined heating of top and bottom heater ------------
-// Combined steps will always have the convection fan on due to the desire to equally heat both sides
-// Linear ramp step
-class LinearStep;
-// AFAP step -> may cause overshoot
-class InstantStep;
+#pragma region Variables
 
-// ----------- Profile steps for independent heating of top and bottom heater ------------
-// Independent linear ramp step
-class BiLinearStep;
-// Independent AFAP step -> may cause overshoot
-class BiInstantStep;
+SemaphoreHandle_t SPI_Mutex = xSemaphoreCreateMutex();
 
-Page* currentPage = nullptr; // pointer to the current page being displayed
-
-/*
-===============================================================================================
-                                          Variables
-===============================================================================================
-*/
 // debug
-bool safemode = false;
-unsigned long lastLoopStart = 0, lastLoopEnd = 0, loopDuration = 0;
+bool safemode = false, rollbackTouching = false, rollbackWasTouching = false;
+unsigned long lastLoopStart = 0, lastLoopEnd = 0, loopDuration = 0, lastRollbackTouchCheck = 0, rollbackPressStart = 0;
 
 // Wireless
 const char* ssid = SSID;
@@ -89,7 +85,6 @@ const int daylightOffset_sec = 3600;
 bool validNTP = false;
 unsigned long lastNTPCheck = -60000, NTPCheckInterval = 60000; // check every minute
 tm timeinfo;
-
 
 WebServer server(80);
 String header;
@@ -131,43 +126,210 @@ unsigned long dutyCycleStep = PWM_PERIOD / PWM_STEPS; // how much to increase th
 bool fanState = false; // state of the convection fan
 
 // Profile Variables
-String profiles[MAX_PROFILES]; // populated at startup
+Profile profiles[MAX_PROFILES]; // populated at startup
+String profileNames[MAX_PROFILES]; // populated at startup
 String profileName = "";
-uint16_t profileIndex = 0, profileLength = 0;
+uint16_t profileIndex = 0, profileCount = 0;
 unsigned long profileStartTime = 0;
 unsigned long profileEstimatedDuration = 0;
-
-ProfileStep* profileSteps[MAX_PROFILE_STEPS]; // populate at profile load
-uint16_t currentStepIndex = 0, totalSteps = 0;
-ProfileStep* currentStep = nullptr; // populate at profile load, reset at profile end or cancel
 bool profileLoaded = false, profileRunning = false;
 
-/*
-===============================================================================================
-                                    Class definitions
-===============================================================================================
-*/
+#pragma endregion Variables
+
+// ============================================================================================
+//                                 Page class instances
+// ============================================================================================
+
+#pragma region PageClasses
+
+class Page;
+
+Page* currentPage = nullptr;
+
+// Abstract page class
+class Page {
+  public:
+
+    Page() {
+      darkGrey = buffer.color565(80, 80, 80);
+      darkerGrey = buffer.color565(60, 60, 60);
+      darkestGrey = buffer.color565(30, 30, 30);
+      highlightGrey = buffer.color565(100, 100, 100);
+    }
+    virtual void Update() = 0;
+    virtual void OnTouch(uint16_t x, uint16_t y) = 0;
+    virtual void UpdateTouch(uint16_t x, uint16_t y) = 0;
+    virtual void OnRelease(uint16_t x, uint16_t y) = 0;
+    void Push(){
+        xSemaphoreTake(SPI_Mutex, portMAX_DELAY);
+        buffer.pushSprite(DRAW_LEFT, DRAW_TOP);
+        xSemaphoreGive(SPI_Mutex);
+    }
+
+    void Push(uint16_t x, uint16_t y, uint16_t w, uint16_t h){
+        xSemaphoreTake(SPI_Mutex, portMAX_DELAY);
+        buffer.pushSprite(DRAW_LEFT + x, DRAW_TOP + y, x, y, w, h);
+        xSemaphoreGive(SPI_Mutex);
+    }
+
+    void SwitchTo(Page* newPage) {
+      currentPage = newPage;
+      newPage->firstDraw = true; // force redraw of the new page
+    }
+  protected:    
 
 
-// =================================================================================================
-//                                    Page class instances
-// =================================================================================================    
+    uint32_t darkGrey, darkerGrey, darkestGrey, highlightGrey;
+    bool firstDraw = true; // flag to indicate if it's the first time drawing the page
+    unsigned long lastUpdate = 0;
+};
 
-SemaphoreHandle_t SPI_Mutex = xSemaphoreCreateMutex();
+class HomePage;
+class ProfilePage;
+class MonitorPage;
+class SettingsPage;
+class PIDSettingsPage;
+class NetworkSettingsPage;
+class WiFiSettingsPage;
 
-HomePage homePage = HomePage(&buffer, &currentPage, &SPI_Mutex);
-ProfilePage profilePage = ProfilePage(&buffer, &currentPage, &SPI_Mutex);
-MonitorPage monitorPage = MonitorPage(&buffer, &currentPage, &SPI_Mutex);
-SettingsPage settingsPage = SettingsPage(&buffer, &currentPage, &SPI_Mutex);
-PIDSettingsPage pidSettingsPage = PIDSettingsPage(&buffer, &currentPage, &SPI_Mutex);
-NetworkSettingsPage networkSettingsPage = NetworkSettingsPage(&buffer, &currentPage, &SPI_Mutex);
-WiFiSettingsPage wifiSettingsPage = WiFiSettingsPage(&buffer, &currentPage, &SPI_Mutex);
+// Main navigation page
+class HomePage : public Page {
+    public:
+        HomePage() : Page() {}
+        void LinkPages(ProfilePage* profilePage, SettingsPage* settingsPage, MonitorPage* monitorPage);
+        void Update() override;
+        void DrawStatic();
+        void OnTouch(uint16_t x, uint16_t y) override;
+        void UpdateTouch(uint16_t x, uint16_t y) override;
+        void OnRelease(uint16_t x, uint16_t y) override;
+    private:
+        int padding = 5;
+        int width = DRAW_WIDTH / 3;
 
-/*
-===============================================================================================
-                                          Task Setup
-===============================================================================================
-*/
+        bool touchingProfile = false, touchingSettings = false, touchingMonitor = false;
+        bool wasTouchingProfile = false, wasTouchingSettings = false, wasTouchingMonitor = false;
+
+        uint16_t 
+            monitorX = padding, monitorY =  200 + padding, 
+            monitorWidth = 150 - (2 * padding), monitorHeight = 90 - (2 * padding),
+
+            profileX = 150 + padding, profileY =  200 + padding, 
+            profileWidth = 150 - (2 * padding), profileHeight = 90 - (2 * padding),
+
+            settingsX = 300 + padding, settingsY = 200 + padding, 
+            settingsWidth = 150 - (2 * padding), settingsHeight = 90 - (2 * padding);
+
+
+        ProfilePage* linkedProfilePage = nullptr;
+        SettingsPage* linkedSettingsPage = nullptr;
+        MonitorPage* linkedMonitorPage = nullptr;
+};
+
+// Page for selecting and running profiles
+class ProfilePage : public Page {
+    public:
+        ProfilePage() : Page() {}
+        void LinkPages(HomePage* homePage);
+        void Update() override;
+        void DrawStatic();
+        void OnTouch(uint16_t x, uint16_t y) override;
+        void UpdateTouch(uint16_t x, uint16_t y) override;
+        void OnRelease(uint16_t x, uint16_t y) override;
+    private:
+        HomePage* linkedHomePage = nullptr;
+};
+
+// Page for showing the running a profile and showing progress
+class MonitorPage : public Page {
+    public:
+        MonitorPage() : Page() {}
+        void LinkPages(HomePage* homePage);
+        void Update() override;
+        void DrawStatic();
+        void OnTouch(uint16_t x, uint16_t y) override;
+        void UpdateTouch(uint16_t x, uint16_t y) override;
+        void OnRelease(uint16_t x, uint16_t y) override;
+    private:
+        HomePage* linkedHomePage = nullptr;
+};
+
+// Page for showing submenus for different settings
+class SettingsPage : public Page {
+    public:
+        SettingsPage() : Page() {}
+        void LinkPages(HomePage* homePage, String settingNames[], Page* subPages[], int numSubPages);
+        void Update() override;
+        void DrawStatic();
+        void OnTouch(uint16_t x, uint16_t y) override;
+        void UpdateTouch(uint16_t x, uint16_t y) override;
+        void OnRelease(uint16_t x, uint16_t y) override;
+    private:
+        HomePage* linkedHomePage = nullptr;
+        Page* subPages[SETTING_SUBPAGES]; // maximum of 10 subpages for now
+        String settingNames[SETTING_SUBPAGES];
+};
+
+// Page for setting PID parameters Kp, Ki, and Kd, mainly for tuning
+class PIDSettingsPage : public Page {
+    public:
+        PIDSettingsPage() : Page() {}
+        void LinkPages(SettingsPage* settingsPage);
+        void Update() override;
+        void DrawStatic();
+        void OnTouch(uint16_t x, uint16_t y) override;
+        void UpdateTouch(uint16_t x, uint16_t y) override;
+        void OnRelease(uint16_t x, uint16_t y) override;
+    private:
+        SettingsPage* linkedSettingsPage = nullptr;
+};
+
+// Page for setting WiFi SSID and Password (and possibly other network settings in the future like MQTT, BT, etc)
+class NetworkSettingsPage : public Page {
+    public:
+        NetworkSettingsPage() : Page() {}
+        void LinkPages(SettingsPage* settingsPage, String settingNames[], Page* subPages[], int numSubPages);
+        void Update() override;
+        void DrawStatic();
+        void OnTouch(uint16_t x, uint16_t y) override;
+        void UpdateTouch(uint16_t x, uint16_t y) override;
+        void OnRelease(uint16_t x, uint16_t y) override;
+    private:
+        SettingsPage* linkedSettingsPage = nullptr;
+        Page* subPages[NETWORK_SUBPAGES]; // maximum of 10 subpages for now
+        String settingNames[NETWORK_SUBPAGES];
+};
+
+// Page for setting WiFi SSID and Password
+class WiFiSettingsPage : public Page {
+    public:
+        WiFiSettingsPage() : Page() {}
+        void LinkPages(NetworkSettingsPage* networkSettingsPage);
+        void Update() override;
+        void DrawStatic();
+        void OnTouch(uint16_t x, uint16_t y) override;
+        void UpdateTouch(uint16_t x, uint16_t y) override;
+        void OnRelease(uint16_t x, uint16_t y) override;
+    private:
+        NetworkSettingsPage* linkedNetworkSettingsPage = nullptr;
+};
+
+
+
+HomePage homePage = HomePage();
+ProfilePage profilePage = ProfilePage();
+MonitorPage monitorPage = MonitorPage();
+SettingsPage settingsPage = SettingsPage();
+PIDSettingsPage pidSettingsPage = PIDSettingsPage();
+NetworkSettingsPage networkSettingsPage = NetworkSettingsPage();
+WiFiSettingsPage wifiSettingsPage = WiFiSettingsPage();
+
+#pragma endregion PageClasses
+
+// ============================================================================================
+//                                      Task Setup
+// ============================================================================================
+
+#pragma region Tasks
 
 TaskHandle_t WebServerTaskHandle;
 TaskHandle_t DrawTaskHandle;
@@ -185,7 +347,6 @@ void WebServerTask( void * parameter ){
 void DrawTask( void * parameter ){
   for(;;){
     DrawUI();
-    
     vTaskDelay(  (1000 / REFRESH_RATE)  / portTICK_PERIOD_MS );
   }
 }
@@ -201,18 +362,17 @@ void TimeCriticalTasks( void * parameter ){
   for(;;){
     SampleTemperatures();
     SlowPWM();
-
-    // prevent watchdog
     vTaskDelay( 10  / portTICK_PERIOD_MS);
   }
 }
 
+#pragma endregion Tasks
 
-/*
-===============================================================================================
-                                        Setup & Loop
-===============================================================================================
-*/
+// ============================================================================================
+//                                     Setup & Loop
+// ============================================================================================
+
+#pragma region SetupAndLoop
 
 void setup(){
 
@@ -223,6 +383,11 @@ void setup(){
   pinMode(RELAY_T, OUTPUT);
 
   // ============== Startup Sound ==============
+
+  // the internal DAC and ADC are not used except for buzzer functions
+  // temperature is measured by the ADS1219 over I2C
+  // PID is done through manual PWM on the relays as the normal PWM frequencies is too high for AC solid state relays
+  // so we can change the analog frequency without affecting anything else
   analogWriteResolution(12);
 
   analogWriteFrequency(2000);
@@ -239,16 +404,7 @@ void setup(){
   Serial0.println("Setup started");
 
   // =========== Setup TFT display ==============
-  Serial0.println("TFT init");
-  tft.begin();
-  tft.fillScreen(TFT_BLACK);
-  tft.setRotation(1);
-  tft.setFreeFont( &FreeSans9pt7b );
-  tft.setTextSize(1);
-  tft.setCursor(0 ,20);
-  tft.setTextColor(TFT_WHITE);
-  tft.println("Firmware v" FIRMWARE_VERSION);
-  tft.println("TFT and Touchscreen initialized");
+  SetupTFT();
 
   safemode |= tft.getTouch(&lastX, &lastY); // read initial touch state to check for safe mode
 
@@ -256,13 +412,11 @@ void setup(){
   SetupWiFi();
   
   safemode |= tft.getTouch(&lastX, &lastY); // read initial touch state to check for safe mode
-  delay(500);
 
   // =========== Setup OTA ==============
   SetupOTA();
 
   safemode |= tft.getTouch(&lastX, &lastY); // read initial touch state to check for safe mode
-  delay(500);
 
   // ========== Check for safe mode ============
   // As the bare essentials have been set up, check for touchscreen input to enter safe mode
@@ -272,115 +426,43 @@ void setup(){
     return;
   }
 
-  delay(500);
   tft.println("No input detected, continuing setup...");
-
+  delay(1000); // wait a bit to allow the user to remove their finger
 
   // ========== Setup PID ============
-  Serial0.println("PID init");
-  tft.println("PID initializing...");
   SetupPID();
 
-  delay(500);
-
   // ========== Setup ADS1219 ============
-  Serial0.println("Auxilary ADC init");
-  tft.println("Auxilary ADC initializing...");
-
-  while (!ads.begin(Wire, 0x44)) {
-    tft.println("Failed to communicate with ADS1219.");
-    delay(500);
-  }
-
-  ads.setVoltageReference(ADS1219_VREF_EXTERNAL);
-  ads.setGain(ADS1219_GAIN_1);
-
-  delay(500);
+  SetupADS();
 
   // ======== Setup File System ==========
   SetupFS();
 
-  delay(500);
   // ======== Setup Webserver ==========
-
   SetupWebServer();
-
-  delay(500);
 
   // ======== Get the time ==========
   configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
 
   // ====== Setup Sprite Buffers =======
-  Serial0.println("Sprite buffers init");
-  tft.println("Sprite buffers initializing...");
-  buffer.createSprite(DRAW_WIDTH, DRAW_HEIGHT);
-  buffer.setFreeFont( &FreeSans9pt7b );
-  buffer.setAttribute(PSRAM_ENABLE, true); // enable psram for the sprite buffer
-
-  topBar.createSprite(SCREEN_WIDTH, DRAW_TOP);
-  topBar.setFreeFont( &FreeSans9pt7b );
-  topBar.setAttribute(PSRAM_ENABLE, true); // enable psram for the sprite buffer
-
-  leftBar.createSprite(DRAW_LEFT, DRAW_HEIGHT);
-  leftBar.setFreeFont( &FreeSans9pt7b );
-  leftBar.setAttribute(PSRAM_ENABLE, true); // enable psram for the sprite buffer
-
-  delay(500);
+  SetupBuffers();
 
   // ========== Setup Pages ============
-  Serial0.println("Pages init");
-  tft.println("Pages initializing...");
   SetupPages();
-  
-  delay(500);
 
   // =========== Setup Tasks ==============
-  Serial0.println("Tasks init");
-  tft.println("Tasks initializing...");
 
-  xTaskCreatePinnedToCore(
-    WebServerTask,          /* Function to implement the task */
-    "Web Server Task",       /* Name of the task */
-    10000,            /* Stack size in words */
-    NULL,             /* Task input parameter */
-    0,                /* Priority of the task */
-    &WebServerTaskHandle,  /* Task handle. */
-    1);               /* Core where the task should run */
+  // prevent SPI bus conflicts and a whole crash...
+  xSemaphoreTake(SPI_Mutex, portMAX_DELAY);
+  SetupTasks();
 
-  xTaskCreatePinnedToCore(
-    DrawTask,          /* Function to implement the task */
-    "Draw Task",       /* Name of the task */
-    50000,            /* Stack size in words */
-    NULL,             /* Task input parameter */
-    1,                /* Priority of the task */
-    &DrawTaskHandle,  /* Task handle. */
-    1);               /* Core where the task should run */
-
-  xTaskCreatePinnedToCore(
-    TouchTask,          /* Function to implement the task */
-    "Touch Task",       /* Name of the task */
-    10000,            /* Stack size in words */
-    NULL,             /* Task input parameter */
-    2,                /* Priority of the task */
-    &TouchTaskHandle,  /* Task handle. */
-    1);               /* Core where the task should run */
-             /* Core where the task should run */
-
-  xTaskCreatePinnedToCore(
-    TimeCriticalTasks,          /* Function to implement the task */
-    "TimeCritical Task",       /* Name of the task */
-    10000,            /* Stack size in words */
-    NULL,             /* Task input parameter */
-    3,                /* Priority of the task */
-    &TimeCriticalTasksHandle,  /* Task handle. */
-    0);  
-
-  delay(500);
   // =========== Finalize ==============
 
   tft.println("Setup complete");
-  delay(500);
   tft.fillScreen(TFT_BLACK);
+  
+  // release SPI bus to the tasks
+  xSemaphoreGive(SPI_Mutex);
 }
 
 void loop(){
@@ -394,6 +476,40 @@ void loop(){
     digitalWrite(RELAY_B, LOW);
     digitalWrite(RELAY_T, LOW);
     digitalWrite(RELAY_F, LOW);
+    
+    // Check for rollback touch
+    if (millis() - lastRollbackTouchCheck > 100){
+      lastRollbackTouchCheck = millis();
+      rollbackTouching = tft.getTouch(&lastX, &lastY);
+      rollbackWasTouching = rollbackTouching;
+
+      if (rollbackTouching && !rollbackWasTouching){
+        rollbackPressStart = millis();
+      } 
+      else if (rollbackWasTouching){
+        if (millis() - rollbackPressStart >= 5000){
+          // Rollback to last version
+          tft.fillScreen(TFT_BLACK);
+          tft.setCursor(160 , 100);
+          tft.setTextColor(TFT_WHITE);
+          tft.println("Rolling back to last version...");
+          Beep();
+          delay(2000);
+          if (!esp_ota_mark_app_invalid_rollback_and_reboot()) {
+            tft.println("Rollback failed!");
+
+            Beep(1000);
+            delay(2000);
+            
+            Beep(1000);
+            delay(2000);
+
+            Beep(1000);
+            delay(2000);
+          }
+        }
+      }
+    }
     return;
   }
 
@@ -404,16 +520,30 @@ void loop(){
   lastLoopEnd = millis();
 }
 
-/*
-===============================================================================================
-                                    Setup Functions
-===============================================================================================
-*/
+#pragma endregion SetupAndLoop
+
+// ============================================================================================
+//                                    Setup Functions
+// ============================================================================================
+
+#pragma region SetupFunctions
+
+void SetupTFT(){
+  Serial0.println("TFT init");
+  tft.begin();
+  tft.fillScreen(TFT_BLACK);
+  tft.setRotation(1);
+  tft.setFreeFont( &FreeSans9pt7b );
+  tft.setTextSize(1);
+  tft.setCursor(0 ,20);
+  tft.setTextColor(TFT_WHITE);
+  tft.println("Firmware v" FIRMWARE_VERSION);
+  tft.println("TFT and Touchscreen initialized");
+}
 
 void SetupWiFi(){
   
   Serial0.println("Wifi init");
-  tft.println("Wifi initializing...");
 
   WiFi.begin(ssid, password);
   
@@ -439,10 +569,14 @@ void SetupWiFi(){
 
 void SetupWebServer(){
   Serial0.println("Webserver init");
-  tft.println("Webserver initializing...");
   server.begin();
 
+  // TODO: Add all webserver routes here
   server.serveStatic("/static", LittleFS, "/static");
+
+  Serial0.println("Webserver initialized");
+  tft.println("Webserver initialized");
+
 }
 
 // This functions mounts LittleFS
@@ -452,6 +586,7 @@ void SetupFS() {
   if (!LittleFS.begin()) {
     Serial0.println("LittleFS Mount Failed");
     tft.println("LittleFS Mount Failed");
+    delay(1000);
     return;
   }
 
@@ -471,10 +606,21 @@ void SetupFS() {
   tft.println("%) bytes used");
 }
 
+void SetupADS(){
+  Serial0.println("Auxilary ADC init");
+
+  while (!ads.begin(Wire, 0x44)) {
+    tft.println("Failed to communicate with ADS1219.!");
+    delay(1000);
+  }
+  ads.setVoltageReference(ADS1219_VREF_EXTERNAL);
+  ads.setGain(ADS1219_GAIN_1);
+}
+
 void SetupOTA(){
   Serial0.println("OTA init");
-  tft.println("OTA handler initializing...");
-  ArduinoOTA.setHostname("TostiReflow V2");
+  ArduinoOTA.setHostname("tostireflowOTA");
+  ArduinoOTA.setPasswordHash(OTA_PASSWORD_HASH);
   ArduinoOTA.setMdnsEnabled(true);
 
   ArduinoOTA
@@ -534,6 +680,9 @@ void SetupOTA(){
 }
 
 void SetupPages(){
+  Serial0.println("Pages init");
+
+  // link pages
   homePage.LinkPages(&profilePage, &settingsPage, &monitorPage);
   profilePage.LinkPages(&homePage);
   monitorPage.LinkPages(&homePage);
@@ -546,11 +695,18 @@ void SetupPages(){
      new Page*[NETWORK_SUBPAGES]{&wifiSettingsPage}, NETWORK_SUBPAGES);
   wifiSettingsPage.LinkPages(&networkSettingsPage);
 
+  // set initial page
   currentPage = &homePage;
+
+  Serial0.println("Pages initialized");
+  tft.println("Pages initialized");
 }
 
 // This function sets up the PID controller
+// None of the functions have a failure state, so no error handling is needed
 void SetupPID(){
+  Serial0.println("PID init");
+
   SetpointT = 0;
   SetpointB = 0;
 
@@ -570,13 +726,81 @@ void SetupPID(){
 
   OutputT = 0; // initialize OutputT to 0
   OutputB = 0; // initialize OutputB to 0
+
+  ProfileStep::begin(&InputT, &InputB, &SetpointT, &SetpointB);
+
+  Serial0.println("PID initialized");
+  tft.println("PID initialized");
 }
 
-/*
-===============================================================================================
-                                    Main Loop Functions
-===============================================================================================
-*/
+void SetupBuffers(){
+  Serial0.println("Sprite buffers init");
+  buffer.createSprite(DRAW_WIDTH, DRAW_HEIGHT);
+  buffer.setFreeFont( &FreeSans9pt7b );
+  buffer.setAttribute(PSRAM_ENABLE, true); // enable psram for the sprite buffer
+
+  topBar.createSprite(SCREEN_WIDTH, DRAW_TOP);
+  topBar.setFreeFont( &FreeSans9pt7b );
+  topBar.setAttribute(PSRAM_ENABLE, true); // enable psram for the sprite buffer
+
+  leftBar.createSprite(DRAW_LEFT, DRAW_HEIGHT);
+  leftBar.setFreeFont( &FreeSans9pt7b );
+  leftBar.setAttribute(PSRAM_ENABLE, true); // enable psram for the sprite buffer
+  Serial0.println("Sprite buffers initialized");
+  tft.println("Sprite buffers initialized");
+}
+
+void SetupTasks(){
+  Serial0.println("Tasks init");
+
+  xTaskCreatePinnedToCore(
+    WebServerTask,          /* Function to implement the task */
+    "Web Server Task",       /* Name of the task */
+    10000,            /* Stack size in words */
+    NULL,             /* Task input parameter */
+    0,                /* Priority of the task */
+    &WebServerTaskHandle,  /* Task handle. */
+    1);               /* Core where the task should run */
+
+  xTaskCreatePinnedToCore(
+    DrawTask,          /* Function to implement the task */
+    "Draw Task",       /* Name of the task */
+    50000,            /* Stack size in words */
+    NULL,             /* Task input parameter */
+    1,                /* Priority of the task */
+    &DrawTaskHandle,  /* Task handle. */
+    1);               /* Core where the task should run */
+
+  xTaskCreatePinnedToCore(
+    TouchTask,          /* Function to implement the task */
+    "Touch Task",       /* Name of the task */
+    10000,            /* Stack size in words */
+    NULL,             /* Task input parameter */
+    2,                /* Priority of the task */
+    &TouchTaskHandle,  /* Task handle. */
+    1);               /* Core where the task should run */
+              /* Core where the task should run */
+
+  xTaskCreatePinnedToCore(
+    TimeCriticalTasks,          /* Function to implement the task */
+    "TimeCritical Task",       /* Name of the task */
+    10000,            /* Stack size in words */
+    NULL,             /* Task input parameter */
+    3,                /* Priority of the task */
+    &TimeCriticalTasksHandle,  /* Task handle. */
+    0);  
+
+  Serial0.println("Tasks initialized");
+  tft.println("Tasks initialized");
+}
+
+#pragma endregion SetupFunctions
+
+// ============================================================================================
+//                                   Main Loop Functions
+// ============================================================================================
+
+#pragma region LoopFunctions
 
 void DrawUI(){
 
@@ -778,13 +1002,567 @@ void SlowPWM(){
   if (OutputB > 0) digitalWrite(RELAY_B, HIGH);
 }
 
+void LoadProfiles(){
+  // directory to scan
+  String path = "/profiles";
+  fs::File dir = LittleFS.open(path, "r");
+  if (!dir || !dir.isDirectory()) {
+    Serial0.println("Failed to open directory for reading");
+    return;
+  }
+
+  int index = 0;
+  fs::File file = dir.openNextFile();
+  while (file) {
+    String fileName = file.name();
+    String prfName = fileName.substring(0, fileName.length() - 4); // remove .prf extension
+    if (!fileName.endsWith(".prf")) {
+      file = dir.openNextFile();
+      continue; // skip non-profile files (Why are they here anyway?)
+    }
+
+    if (index < MAX_PROFILES) {
+      profileNames[index] = prfName; 
+      Profile prf = Profile();
+      prf.name = prfName;
+      profiles[index] = prf;
 
 
-/*
-===============================================================================================
-                                   Webpages and APIs
-===============================================================================================
-*/
+      if (profiles[index].LoadFromFile(file)) {
+        Serial0.println("Loaded profile: " + prfName);
+      } else {
+        Serial0.println("Failed to load profile: " + prfName);
+        profileNames[index] = "INVALID";
+      }
+      index++;
+    } else {
+      Serial0.println("Maximum number of profiles reached, skipping remaining files");
+      break;
+    }
+  }
+}
+
+#pragma endregion LoopFunctions
+
+// ============================================================================================
+//                                  Touchscreen UI Pages
+// ============================================================================================
+
+#pragma region PageImplementations
+
+// ============================================================================================
+//                             Home Page - main navigation page
+// ============================================================================================
+
+#pragma region HomePage
+
+void HomePage::LinkPages(ProfilePage *profilePage, SettingsPage *settingsPage, MonitorPage *monitorPage){
+  // Link the pages together
+  linkedProfilePage = profilePage;
+  linkedSettingsPage = settingsPage;
+  linkedMonitorPage = monitorPage;
+}
+
+void HomePage::Update() {
+  // Nothing to update on the home page for now
+  if (firstDraw){
+    DrawStatic();
+    firstDraw = false;
+  }
+}
+
+void HomePage::DrawStatic(){
+  // Draw static elements that don't change often
+
+  buffer.fillSprite(darkestGrey);
+  buffer.setTextColor(TFT_WHITE);
+
+  // Draw the home page UI elements
+
+  // Title
+  buffer.setTextSize(2);
+  buffer.setCursor(95, 115);
+  buffer.println("Tosti Reflow V2");
+  buffer.setTextSize(1);
+  buffer.setCursor(145, 145);
+  buffer.println("by JTD Chen, v" FIRMWARE_VERSION);
+
+  // Buttons for navigation
+  // Monitor Button
+  buffer.fillRoundRect(monitorX, monitorY, monitorWidth, monitorHeight, 5, darkerGrey);
+  buffer.setCursor(45, 255);
+  buffer.println("Monitor");
+
+  // Profile Button
+  buffer.fillRoundRect(profileX, profileY, profileWidth, profileHeight, 5, darkerGrey);
+  buffer.setCursor(200, 255);
+  buffer.println("Profile");
+
+  // Settings Button
+  buffer.fillRoundRect(settingsX, settingsY, settingsWidth, settingsHeight, 5, darkerGrey);
+  buffer.setCursor(340, 255);
+  buffer.println("Settings");
+
+  Push();
+}
+
+void HomePage::OnTouch(uint16_t x, uint16_t y) {
+  // Check if touching any of the buttons
+  wasTouchingProfile = (x >= profileX && x <= profileX + profileWidth && y >= profileY && y <= profileY + profileHeight);
+  wasTouchingSettings = (x >= settingsX && x <= settingsX + settingsWidth && y >= settingsY && y <= settingsY + settingsHeight);
+  wasTouchingMonitor = (x >= monitorX && x <= monitorX + monitorWidth && y >= monitorY && y <= monitorY + monitorHeight);
+
+  if (wasTouchingProfile || wasTouchingSettings || wasTouchingMonitor) {
+    // Redraw buttons with highlight
+    if (wasTouchingProfile) {
+      buffer.fillRoundRect(profileX, profileY, profileWidth, profileHeight, 5, highlightGrey);
+      buffer.setCursor(200, 255);
+      buffer.println("Profile");
+      Push(profileX, profileY, profileWidth, profileHeight);
+    } 
+    if (wasTouchingSettings) {
+      buffer.fillRoundRect(settingsX, settingsY, settingsWidth, settingsHeight, 5, highlightGrey);
+      buffer.setCursor(340, 255);
+      buffer.println("Settings");
+      Push(settingsX, settingsY, settingsWidth, settingsHeight);
+    } 
+    if (wasTouchingMonitor) {
+      buffer.fillRoundRect(monitorX, monitorY, monitorWidth, monitorHeight, 5, highlightGrey);
+      buffer.setCursor(45, 255);
+      buffer.println("Monitor");
+      Push(monitorX, monitorY, monitorWidth, monitorHeight);
+    } 
+  }
+}
+
+void HomePage::UpdateTouch(uint16_t x, uint16_t y) {
+  
+}
+
+void HomePage::OnRelease(uint16_t x, uint16_t y) {
+
+  touchingProfile = (x >= profileX && x <= profileX + profileWidth && y >= profileY && y <= profileY + profileHeight);
+  touchingSettings = (x >= settingsX && x <= settingsX + settingsWidth && y >= settingsY && y <= settingsY + settingsHeight);
+  touchingMonitor = (x >= monitorX && x <= monitorX + monitorWidth && y >= monitorY && y <= monitorY + monitorHeight);
+
+  // If touch is released within a button, navigate to that page
+  if (!touchingProfile && !touchingSettings && !touchingMonitor) {
+
+    if (wasTouchingProfile){
+      // Redraw Profile button to normal
+      buffer.fillRoundRect(profileX, profileY, profileWidth, profileHeight, 5, darkerGrey);
+      buffer.setCursor(200, 255);
+      buffer.println("Profile");
+      Push(profileX, profileY, profileWidth, profileHeight);
+    }
+
+    if (wasTouchingMonitor){
+      // Redraw Monitor button to normal
+      buffer.fillRoundRect(monitorX, monitorY, monitorWidth, monitorHeight, 5, darkerGrey);
+      buffer.setCursor(45, 255);
+      buffer.println("Monitor");
+      Push(monitorX, monitorY, monitorWidth, monitorHeight);
+    }
+
+    if (wasTouchingSettings){
+      // Redraw Settings button to normal
+      buffer.fillRoundRect(settingsX, settingsY, settingsWidth, settingsHeight, 5, darkerGrey);
+      buffer.setCursor(340, 255);
+      buffer.println("Settings");
+      Push(settingsX, settingsY, settingsWidth, settingsHeight);
+    }
+
+    return; // Not touching any button
+  }
+
+  if (touchingProfile) {
+    SwitchTo(linkedProfilePage);
+  } else if (touchingSettings) {
+    SwitchTo(linkedSettingsPage);
+  } else if (touchingMonitor) {
+    SwitchTo(linkedMonitorPage);
+  }
+
+  // Reset touch states
+  touchingProfile = false;
+  touchingSettings = false;
+  touchingMonitor = false;
+}
+
+#pragma endregion HomePage
+
+// ============================================================================================
+//                      Profile Page - for selecting and running profiles
+// ============================================================================================
+
+#pragma region ProfilePage
+
+void ProfilePage::LinkPages(HomePage* homePage) {
+  // Link the pages together
+  linkedHomePage = homePage;
+}
+
+void ProfilePage::Update() {
+  // Update logic for ProfilePage
+  if (firstDraw){
+    DrawStatic();
+    firstDraw = false;
+  }
+}
+
+void ProfilePage::DrawStatic(){
+  // Draw static elements that don't change often
+
+  buffer.fillSprite(darkestGrey);
+  buffer.setTextColor(TFT_WHITE);
+
+  // Draw the profile page UI elements
+
+  // Title
+  buffer.setTextSize(2);
+  buffer.setCursor(145, 130);
+  buffer.println("Profile Page");
+  buffer.setTextSize(1);
+  buffer.setCursor(95, 160);
+  buffer.println("Select and run profiles");
+
+  // Back Button and Header Bar
+  buffer.fillRect(60,0, DRAW_WIDTH - 60, 35, darkGrey);
+  buffer.fillRoundRect(0, 0, 60, 35, 3, darkerGrey);
+  buffer.setCursor(5, 20);
+  buffer.println("Back");
+
+  Push();
+}
+
+void ProfilePage::OnTouch(uint16_t x, uint16_t y) {
+  // Handle touch start on ProfilePage
+  if (x <= 60 && y <= 35) {
+    SwitchTo(linkedHomePage);
+  }
+}
+
+void ProfilePage::UpdateTouch(uint16_t x, uint16_t y) {
+  // Handle touch move on ProfilePage
+}
+
+void ProfilePage::OnRelease(uint16_t x, uint16_t y) {
+  // Handle touch release on ProfilePage
+}
+
+#pragma endregion ProfilePage
+
+// ============================================================================================
+//           Monitor Page - for showing the running a profile and showing progress
+// ============================================================================================
+
+#pragma region MonitorPage
+
+void MonitorPage::LinkPages(HomePage* homePage) {
+  // Link the pages together
+  linkedHomePage = homePage;
+}
+void MonitorPage::Update() {
+  // Update logic for MonitorPage
+  if (firstDraw){
+    DrawStatic();
+    firstDraw = false;
+  }
+}
+
+void MonitorPage::DrawStatic() {
+  // Draw static elements that don't change often
+
+  buffer.fillSprite(darkestGrey);
+  buffer.setTextColor(TFT_WHITE);
+
+  // Draw the monitor page UI elements
+
+  // Title
+  buffer.setTextSize(2);
+  buffer.setCursor(140, 130);
+  buffer.println("Monitor");
+  buffer.setTextSize(1);
+  buffer.setCursor(95, 160);
+  buffer.println("Profile: None");
+
+  
+  // Back Button and Header Bar
+  buffer.fillRect(60,0, DRAW_WIDTH - 60, 35, darkGrey);
+  buffer.fillRoundRect(0, 0, 60, 35, 3, darkerGrey);
+  buffer.setCursor(5, 20);
+  buffer.println("Back");
+
+  Push();
+}
+
+void MonitorPage::OnTouch(uint16_t x, uint16_t y) {
+  if (x <= 60 && y <= 35) {
+    SwitchTo(linkedHomePage);
+  }
+}
+
+void MonitorPage::UpdateTouch(uint16_t x, uint16_t y) {
+  // Handle touch move on MonitorPage
+}
+
+void MonitorPage::OnRelease(uint16_t x, uint16_t y) {
+  // Handle touch release on MonitorPage
+}
+
+#pragma endregion MonitorPage
+
+// ============================================================================================
+//             Settings Page - for showing submenus for different settings
+// ============================================================================================
+
+#pragma region SettingsPage
+
+void SettingsPage::LinkPages(HomePage* homePage, String settingNames[], Page* subPages[], int numSubPages) {
+  // Link the pages together
+  linkedHomePage = homePage;
+  for (int i = 0; i < numSubPages; i++) {
+    this->subPages[i] = subPages[i];
+    this->settingNames[i] = settingNames[i];
+  }
+}
+
+void SettingsPage::Update() {
+  // Update logic for SettingsPage
+  if (firstDraw){
+    DrawStatic();
+    firstDraw = false;
+  }
+}
+
+void SettingsPage::DrawStatic(){
+  // Draw static elements that don't change often
+
+  buffer.fillSprite(darkestGrey);
+  buffer.setTextColor(TFT_WHITE);
+
+  // Draw the settings page UI elements
+
+  // Title
+  buffer.setTextSize(2);
+  buffer.setCursor(130, 130);
+  buffer.println("Settings");
+  buffer.setTextSize(1);
+  buffer.setCursor(95, 160);
+  buffer.println("Configure system settings");
+
+  // Back Button and Header Bar
+  buffer.fillRect(60,0, DRAW_WIDTH - 60, 35, darkGrey);
+  buffer.fillRoundRect(0, 0, 60, 35, 3, darkerGrey);
+  buffer.setCursor(5, 20);
+  buffer.println("Back");
+
+  Push();
+}
+
+void SettingsPage::OnTouch(uint16_t x, uint16_t y) {
+  // Handle touch start on SettingsPage
+  if (x <= 60 && y <= 35) {
+    SwitchTo(linkedHomePage);
+  }
+}
+
+void SettingsPage::UpdateTouch(uint16_t x, uint16_t y) {
+  // Handle touch move on SettingsPage
+}
+
+void SettingsPage::OnRelease(uint16_t x, uint16_t y) {
+  // Handle touch release on SettingsPage
+}
+
+#pragma endregion SettingsPage
+
+// ============================================================================================
+//              PID Settings Page - for setting PID parameters and tuning
+// ============================================================================================
+
+#pragma region PIDSettingsPage
+
+void PIDSettingsPage::LinkPages(SettingsPage* settingsPage) {
+  // Link the pages together
+  linkedSettingsPage = settingsPage;
+}
+
+void PIDSettingsPage::Update() {
+  // Update logic for PIDSettingsPage
+  if (firstDraw){
+    DrawStatic();
+    firstDraw = false;
+  }
+}
+
+void PIDSettingsPage::DrawStatic(){
+  // Draw static elements that don't change often
+
+  buffer.fillSprite(darkestGrey);
+  buffer.setTextColor(TFT_WHITE);
+
+  // Draw the PID settings page UI elements
+
+  // Title
+  buffer.setTextSize(2);
+  buffer.setCursor(120, 130);
+  buffer.println("PID Settings");
+  buffer.setTextSize(1);
+  buffer.setCursor(95, 160);
+  buffer.println("Set PID parameters");
+
+  // Back Button and Header Bar
+  buffer.fillRect(60,0, DRAW_WIDTH - 60, 35, darkGrey);
+  buffer.fillRoundRect(0, 0, 60, 35, 3, darkerGrey);
+  buffer.setCursor(5, 20);
+  buffer.println("Back");
+
+  Push();
+}
+
+void PIDSettingsPage::OnTouch(uint16_t x, uint16_t y) {
+  // Handle touch start on PIDSettingsPage
+}
+
+void PIDSettingsPage::UpdateTouch(uint16_t x, uint16_t y) {
+  // Handle touch move on PIDSettingsPage
+}
+
+void PIDSettingsPage::OnRelease(uint16_t x, uint16_t y) {
+  // Handle touch release on PIDSettingsPage
+}
+
+#pragma endregion PIDSettingsPage
+
+// ============================================================================================
+//          Network Settings Page - Navigation for setting network related settings
+// ============================================================================================
+
+#pragma region NetworkSettingsPage
+
+void NetworkSettingsPage::LinkPages(SettingsPage* settingsPage, String settingNames[], Page* subPages[], int numSubPages) {
+  // Link the pages together
+  linkedSettingsPage = settingsPage;
+  for (int i = 0; i < numSubPages; i++) {
+    this->subPages[i] = subPages[i];
+    this->settingNames[i] = settingNames[i];
+  }
+}
+
+void NetworkSettingsPage::Update() {
+  // Update logic for NetworkSettingsPage
+  if (firstDraw){
+    DrawStatic();
+    firstDraw = false;
+  }
+}
+
+void NetworkSettingsPage::DrawStatic(){
+  // Draw static elements that don't change often
+
+  buffer.fillSprite(darkestGrey);
+  buffer.setTextColor(TFT_WHITE);
+
+  // Draw the network settings page UI elements
+
+  // Title
+  buffer.setTextSize(2);
+  buffer.setCursor(110, 130);
+  buffer.println("Network Settings");
+  buffer.setTextSize(1);
+  buffer.setCursor(95, 160);
+  buffer.println("Configure network settings");
+
+  // Back Button and Header Bar
+  buffer.fillRect(60,0, DRAW_WIDTH - 60, 35, darkGrey);
+  buffer.fillRoundRect(0, 0, 60, 35, 3, darkerGrey);
+  buffer.setCursor(5, 20);
+  buffer.println("Back");
+
+  Push();
+}
+
+void NetworkSettingsPage::OnTouch(uint16_t x, uint16_t y) {
+  // Handle touch start on NetworkSettingsPage
+}
+
+void NetworkSettingsPage::UpdateTouch(uint16_t x, uint16_t y) {
+  // Handle touch move on NetworkSettingsPage
+}
+
+void NetworkSettingsPage::OnRelease(uint16_t x, uint16_t y) {
+  // Handle touch release on NetworkSettingsPage
+}
+
+#pragma endregion NetworkSettingsPage
+
+// ============================================================================================
+//              WiFi Settings Page - for setting WiFi SSID and Password
+// ============================================================================================
+
+#pragma region WiFiSettingsPage
+
+void WiFiSettingsPage::LinkPages(NetworkSettingsPage* networkSettingsPage) {
+  // Link the pages together
+  linkedNetworkSettingsPage = networkSettingsPage;
+}
+
+void WiFiSettingsPage::Update() {
+  // Update logic for WiFiSettingsPage
+  if (firstDraw){
+    DrawStatic();
+    firstDraw = false;
+  }
+}
+
+void WiFiSettingsPage::DrawStatic(){
+  // Draw static elements that don't change often
+
+  buffer.fillSprite(darkestGrey);
+  buffer.setTextColor(TFT_WHITE);
+
+  // Draw the WiFi settings page UI elements
+
+  // Title
+  buffer.setTextSize(2);
+  buffer.setCursor(120, 130);
+  buffer.println("WiFi Settings");
+  buffer.setTextSize(1);
+  buffer.setCursor(95, 160);
+  buffer.println("Set SSID and Password");
+
+  // Back Button and Header Bar
+  buffer.fillRect(60,0, DRAW_WIDTH - 60, 35, darkGrey);
+  buffer.fillRoundRect(0, 0, 60, 35, 3, darkerGrey);
+  buffer.setCursor(5, 20);
+  buffer.println("Back");
+
+  Push();
+}
+
+void WiFiSettingsPage::OnTouch(uint16_t x, uint16_t y) {
+  // Handle touch start on WiFiSettingsPage
+  
+}
+
+void WiFiSettingsPage::UpdateTouch(uint16_t x, uint16_t y) {
+  // Handle touch move on WiFiSettingsPage
+}
+
+void WiFiSettingsPage::OnRelease(uint16_t x, uint16_t y) {
+  // Handle touch release on WiFiSettingsPage
+}
+
+#pragma endregion WiFiSettingsPage
+
+#pragma endregion PageImplementations
+
+// ============================================================================================
+//                                   Webpages and APIs
+// ============================================================================================
+
+#pragma region WebPagesAndAPIs
 
 void NotFound(){
   Serial.println("Not Found: " + server.uri());
@@ -802,13 +1580,13 @@ void OnConnect(){
   file.close();
 }
 
+#pragma endregion WebPagesAndAPIs
 
-/*
-===============================================================================================
-                                    Debug Functions
-===============================================================================================
-*/
+// ============================================================================================
+//                                    Debug Functions
+// ============================================================================================
 
+#pragma region DebugFunctions
 
 void DisplayError(String message) {
   tft.fillScreen(TFT_BLACK);
@@ -845,13 +1623,16 @@ void DisplaySafeMode(){
   tft.setCursor(130 , 180);
   tft.println("Restart to leave safe mode");
 
+  tft.fillRoundRect(10, 220, 460, 40, 10, TFT_DARKGREY);
+  tft.setCursor(55, 235);
+  tft.setTextColor(TFT_WHITE);
+  tft.println("Hold for 5 seconds to roll back to last version");
+
   analogWriteFrequency(1000);
 
   analogWrite(BUZZER_PIN, 2048);
   delay(500);
   analogWrite(BUZZER_PIN, 0);
-
-  analogWriteFrequency(5000);
   
 }
 
@@ -860,17 +1641,7 @@ void Beep(){
 }
 
 void Beep(int duration){
-  xTaskCreatePinnedToCore(
-    [] (void* param) {
-      int duration = *((int*)param);
-      analogWriteFrequency(1000);
-      analogWrite(BUZZER_PIN, 2048);
-      vTaskDelay(duration / portTICK_PERIOD_MS);
-      analogWrite(BUZZER_PIN, 0);
-      analogWriteFrequency(5000);
-      vTaskDelete(beepHandle);
-    },
-    "Beep", 10000, &duration, 1, &beepHandle, 0
-  );
+  tone(BUZZER_PIN, 1000, duration); // 1kHz tone
 }
 
+#pragma endregion DebugFunctions

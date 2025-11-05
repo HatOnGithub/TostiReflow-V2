@@ -1,0 +1,20 @@
+DT
+N Preheating
+L 90 R1
+N Soaking
+L 130 T90
+N Rampup and Reflow
+L 165 R1
+N Cooldown
+B
+I 0 INF
+DB
+N Preheating
+L 100 R1
+N Soaking
+L 140 T90
+N Rampup and Reflow
+L 180 R1
+N Cooldown
+B
+I 0 INF

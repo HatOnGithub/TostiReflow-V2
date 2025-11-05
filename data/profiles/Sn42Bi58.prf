@@ -1,3 +1,4 @@
+S
 N Preheating
 L 90 R1
 N Soaking
@@ -6,4 +7,4 @@ N Rampup and Reflow
 L 165 R1
 N Cooldown
 B
-I 0 R-4
+I 0 INF
