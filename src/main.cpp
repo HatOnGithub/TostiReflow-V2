@@ -10,9 +10,15 @@
 #include "LittleFS.h"
 #include <EEPROM.h>
 #include "time.h"
+#include <ctime>
 
 #include <WiFi.h>
-#include <WebServer.h>
+// webserial
+#include <AsyncTCP.h>
+#include <ESPAsyncWebServer.h>
+#include <WebSerial.h>
+
+// embedded webapp and ota
 #include <ESPmDNS.h>
 #include <ArduinoJson.h>
 #include <ArduinoOTA.h>
@@ -44,6 +50,7 @@ void SetupFS();
 void SetupPages();
 void SetupBuffers();
 void SetupTasks();
+void SetupWebSerial();
 
 // Main loop functions
 void HandleTouch();
@@ -51,15 +58,17 @@ void SampleTemperatures();
 void SlowPWM();
 void DrawUI();
 void GetTemperature(int from);
+void LoadProfiles();
 
 // Web server functions and API
-void OnConnect();
 
 // Debug functions
+void recvMsg(uint8_t *data, size_t len);
 void DisplayError(String message);
 void DisplaySafeMode();
 void Beep();
 void Beep(int duration);
+String ulongToTime(unsigned long mills) ;
 
 #pragma endregion FunctionPrototypes
 
@@ -86,8 +95,11 @@ bool validNTP = false;
 unsigned long lastNTPCheck = -60000, NTPCheckInterval = 60000; // check every minute
 tm timeinfo;
 
-WebServer server(80);
+// Webapp server
+AsyncWebServer server(80);
 String header;
+
+AsyncWebServer WebSerialServer(81);
 
 uint32_t last_ota_time = 0;
 
@@ -99,6 +111,7 @@ unsigned long refreshrate = REFRESH_RATE, refreshTime = 1000 / refreshrate, last
 TFT_eSprite topBar = TFT_eSprite(&tft);
 TFT_eSprite leftBar = TFT_eSprite(&tft);
 TFT_eSprite buffer = TFT_eSprite(&tft);
+TFT_eSprite graphSprite = TFT_eSprite(&tft);
 
 // Touchscreen
 uint16_t startX = 0, startY = 0, lastX = 0, lastY = 0;
@@ -127,6 +140,7 @@ bool fanState = false; // state of the convection fan
 
 // Profile Variables
 Profile profiles[MAX_PROFILES]; // populated at startup
+Profile* currentProfile = nullptr; // the profile that is currently running
 String profileNames[MAX_PROFILES]; // populated at startup
 String profileName = "";
 uint16_t profileIndex = 0, profileCount = 0;
@@ -232,11 +246,17 @@ class ProfilePage : public Page {
         void LinkPages(HomePage* homePage);
         void Update() override;
         void DrawStatic();
+        void DrawList(int startIndex);
+        void DrawPreview();
+        void DrawGraph(Profile profile);
         void OnTouch(uint16_t x, uint16_t y) override;
         void UpdateTouch(uint16_t x, uint16_t y) override;
         void OnRelease(uint16_t x, uint16_t y) override;
+        void PreviewProfile(int index);
     private:
         HomePage* linkedHomePage = nullptr;
+        int selectedProfileIndex = 0, profilePagesIndex = 0, profilesPerPage = 4;
+        bool inPreview = false;
 };
 
 // Page for showing the running a profile and showing progress
@@ -246,11 +266,15 @@ class MonitorPage : public Page {
         void LinkPages(HomePage* homePage);
         void Update() override;
         void DrawStatic();
+        void DrawGraph();
+        void UpdateGraph();
         void OnTouch(uint16_t x, uint16_t y) override;
         void UpdateTouch(uint16_t x, uint16_t y) override;
         void OnRelease(uint16_t x, uint16_t y) override;
     private:
         HomePage* linkedHomePage = nullptr;
+        unsigned long graphStartTime = 0, lastGraphUpdate = 0, graphUpdateInterval = 1000; // update graph every second
+        
 };
 
 // Page for showing submenus for different settings
@@ -313,8 +337,6 @@ class WiFiSettingsPage : public Page {
         NetworkSettingsPage* linkedNetworkSettingsPage = nullptr;
 };
 
-
-
 HomePage homePage = HomePage();
 ProfilePage profilePage = ProfilePage();
 MonitorPage monitorPage = MonitorPage();
@@ -331,18 +353,10 @@ WiFiSettingsPage wifiSettingsPage = WiFiSettingsPage();
 
 #pragma region Tasks
 
-TaskHandle_t WebServerTaskHandle;
 TaskHandle_t DrawTaskHandle;
 TaskHandle_t TouchTaskHandle;
 TaskHandle_t TimeCriticalTasksHandle;
 TaskHandle_t beepHandle;
-
-void WebServerTask( void * parameter ){
-  for(;;){
-    server.handleClient();
-    vTaskDelay( 1 / portTICK_PERIOD_MS);
-  }
-}
 
 void DrawTask( void * parameter ){
   for(;;){
@@ -449,6 +463,9 @@ void setup(){
 
   // ========== Setup Pages ============
   SetupPages();
+
+  // ====== Setup WebSerial =======
+  SetupWebSerial();
 
   // =========== Setup Tasks ==============
 
@@ -604,6 +621,9 @@ void SetupFS() {
   tft.print(" (");
   tft.print((float)LittleFS.usedBytes() / (float)LittleFS.totalBytes() * 100, 2);
   tft.println("%) bytes used");
+
+  // Only attempt to load profiles if the FS was mounted successfully
+  LoadProfiles();
 }
 
 void SetupADS(){
@@ -636,7 +656,6 @@ void SetupOTA(){
         vTaskSuspend(DrawTaskHandle);
         vTaskSuspend(TouchTaskHandle);
         vTaskSuspend(TimeCriticalTasksHandle);
-        vTaskSuspend(WebServerTaskHandle);
         digitalWrite(RELAY_B, LOW);
         digitalWrite(RELAY_T, LOW);
         digitalWrite(RELAY_F, LOW);
@@ -702,6 +721,18 @@ void SetupPages(){
   tft.println("Pages initialized");
 }
 
+void SetupWebSerial(){
+  Serial0.println("WebSerial init");
+
+  WebSerial.begin(&WebSerialServer);
+  WebSerial.println("WebSerial initialized");
+  WebSerial.onMessage(recvMsg);
+  WebSerialServer.begin();
+
+  Serial0.println("WebSerial initialized");
+  tft.println("WebSerial initialized");
+}
+
 // This function sets up the PID controller
 // None of the functions have a failure state, so no error handling is needed
 void SetupPID(){
@@ -727,7 +758,7 @@ void SetupPID(){
   OutputT = 0; // initialize OutputT to 0
   OutputB = 0; // initialize OutputB to 0
 
-  ProfileStep::begin(&InputT, &InputB, &SetpointT, &SetpointB);
+  Profile::begin(&InputT, &InputB, &SetpointT, &SetpointB);
 
   Serial0.println("PID initialized");
   tft.println("PID initialized");
@@ -746,21 +777,17 @@ void SetupBuffers(){
   leftBar.createSprite(DRAW_LEFT, DRAW_HEIGHT);
   leftBar.setFreeFont( &FreeSans9pt7b );
   leftBar.setAttribute(PSRAM_ENABLE, true); // enable psram for the sprite buffer
+
+  graphSprite.createSprite(GRAPH_WIDTH, GRAPH_HEIGHT);
+  graphSprite.setFreeFont(&FreeSans9pt7b);
+  graphSprite.setAttribute(PSRAM_ENABLE, true); // enable psram for the sprite buffer
+
   Serial0.println("Sprite buffers initialized");
   tft.println("Sprite buffers initialized");
 }
 
 void SetupTasks(){
   Serial0.println("Tasks init");
-
-  xTaskCreatePinnedToCore(
-    WebServerTask,          /* Function to implement the task */
-    "Web Server Task",       /* Name of the task */
-    10000,            /* Stack size in words */
-    NULL,             /* Task input parameter */
-    0,                /* Priority of the task */
-    &WebServerTaskHandle,  /* Task handle. */
-    1);               /* Core where the task should run */
 
   xTaskCreatePinnedToCore(
     DrawTask,          /* Function to implement the task */
@@ -878,6 +905,51 @@ void DrawUI(){
     topBar.pushSprite(0, 0);
     xSemaphoreGive(SPI_Mutex);
   }
+}
+
+// Assumes times is in seconds for both maxTime and ylineStep 
+void DrawGraphLines(int minTemp, int maxTemp, unsigned long maxTime, unsigned long xlineStep,  int ylineStep){
+  graphSprite.fillSprite(TFT_BLACK);
+  graphSprite.drawRect(0, 0, GRAPH_WIDTH, GRAPH_HEIGHT, TFT_WHITE);
+  graphSprite.setTextColor(TFT_DARKGREY, TFT_BLACK, true);
+
+  int textHeight = graphSprite.fontHeight();
+
+  graphSprite.setTextDatum(ML_DATUM);
+  float ylines = (maxTemp - minTemp) / (float)xlineStep;
+  int ylineSpacing = GRAPH_HEIGHT / ylines;
+  for (int i = 0; i <= (int)ylines; i++) {
+    int y = ylineSpacing * i;
+    String text = String(i * ylineStep);
+    int textWidth = graphSprite.textWidth(text);
+    graphSprite.setCursor(2, y);
+    graphSprite.print(text);
+    graphSprite.drawLine(textWidth + 4, y, GRAPH_WIDTH, y, TFT_DARKGREY);
+  }
+
+  graphSprite.setTextDatum(BC_DATUM);
+  float xlines = maxTime / (float)xlineStep;
+  int xlineSpacing = GRAPH_WIDTH / xlines;
+  for (int i = 0; i <= (int)xlines; i++) {
+    int x = xlineSpacing * i;
+    String text = String(minTemp + i * xlineStep);
+    int textWidth = graphSprite.textWidth(text);
+    graphSprite.setCursor(x, GRAPH_HEIGHT - 2);
+    graphSprite.print(text);
+    graphSprite.drawLine(x, textHeight + 4, x, GRAPH_HEIGHT, TFT_DARKGREY);
+
+  }
+
+  // draw labels last, so they are on top of the grid lines
+  graphSprite.setTextColor(TFT_WHITE, TFT_BLACK, true);
+
+  // Y axis label
+  graphSprite.setCursor(2, 7);
+  graphSprite.print("Temp (C)");
+
+  // X axis label
+  graphSprite.setCursor(GRAPH_WIDTH - 50, GRAPH_HEIGHT - 5);
+  graphSprite.print("Time (s)");
 }
 
 // Handles touchscreen input and updates touch state variables
@@ -1218,14 +1290,6 @@ void ProfilePage::DrawStatic(){
 
   // Draw the profile page UI elements
 
-  // Title
-  buffer.setTextSize(2);
-  buffer.setCursor(145, 130);
-  buffer.println("Profile Page");
-  buffer.setTextSize(1);
-  buffer.setCursor(95, 160);
-  buffer.println("Select and run profiles");
-
   // Back Button and Header Bar
   buffer.fillRect(60,0, DRAW_WIDTH - 60, 35, darkGrey);
   buffer.fillRoundRect(0, 0, 60, 35, 3, darkerGrey);
@@ -1233,6 +1297,88 @@ void ProfilePage::DrawStatic(){
   buffer.println("Back");
 
   Push();
+
+  profilePagesIndex = 0;
+  DrawList(profilePagesIndex);
+}
+
+void ProfilePage::DrawList(int startIndex){
+
+  int pIndex = startIndex * profilesPerPage;
+
+  // draw navigation buttons
+  if (startIndex > 0){
+    // Up Button
+    buffer.fillRoundRect(370, 45, 50, 40, 5, darkGrey);
+    buffer.setCursor(385, 75);
+    buffer.println("Up");
+
+    Push(370, 45, 50, 40);
+  }
+
+  if (startIndex < (profileCount / profilesPerPage) - 1){
+    // Down Button
+    buffer.fillRoundRect(370, 225, 50, 40, 5, darkGrey);
+    buffer.setCursor(385, 255);
+    buffer.println("Down");
+
+    Push(370, 225, 50, 40);
+  }
+
+  // draw profile buttons
+  for (int i = 0; i < profilesPerPage; i++){
+    if (pIndex >= profileCount) break;
+
+    buffer.fillRoundRect(5, 45 + i * 40, 360, 35, 5, darkGrey);
+    buffer.setCursor(15, 70 + i * 40);
+    buffer.println(profiles[pIndex].name);
+
+    Push(5, 45 + i * 40, 360, 35);
+
+    pIndex++;
+  }
+}
+
+void ProfilePage::DrawPreview(){
+  
+  buffer.fillRoundRect(5, 45, 300, 175, 5, darkGrey);
+  DrawGraph(profiles[selectedProfileIndex]);
+  graphSprite.pushToSprite(&buffer, 15, 55);
+
+  Push(5, 45, 300, 175);
+
+  // Load Button
+  buffer.fillRoundRect(315, 45, 125, 55, 5, darkGrey);
+  buffer.setCursor(325, 75);
+  buffer.println("Load");
+
+  // Edit Button
+  buffer.fillRoundRect(315, 105, 125, 55, 5, darkGrey);
+  buffer.setCursor(325, 135);
+  buffer.println("Edit");
+
+  // Delete Button
+  buffer.fillRoundRect(315, 165, 125, 55, 5, darkGrey);
+  buffer.setCursor(325, 195);
+  buffer.println("Delete");
+
+  Push(315, 45, 125, 175);
+
+  // Info Bar
+  buffer.fillRoundRect(5, 225, 435, 60, 5, darkGrey);
+
+  buffer.setCursor(10, 255);
+  buffer.println("Name: " + profiles[selectedProfileIndex].name);
+  buffer.setCursor(10, 275);
+  buffer.print("Duration: " + ulongToTime(profiles[selectedProfileIndex].GetEstimatedDuration()));
+  buffer.print(" | Steps: " + String(profiles[selectedProfileIndex].stepCount));
+  buffer.print(" | Phases: " + String(profiles[selectedProfileIndex].totalPhases));
+
+  Push(5, 225, 435, 60);
+}
+
+void ProfilePage::DrawGraph(Profile profile){
+  
 }
 
 void ProfilePage::OnTouch(uint16_t x, uint16_t y) {
@@ -1248,6 +1394,24 @@ void ProfilePage::UpdateTouch(uint16_t x, uint16_t y) {
 
 void ProfilePage::OnRelease(uint16_t x, uint16_t y) {
   // Handle touch release on ProfilePage
+}
+
+void ProfilePage::PreviewProfile(int index){
+  
+  buffer.fillRect(0, 35, DRAW_WIDTH, DRAW_HEIGHT - 35, darkestGrey);
+
+  // Back Button and Header Bar
+  buffer.fillRect(60,0, DRAW_WIDTH - 60, 35, darkGrey);
+  buffer.fillRoundRect(0, 0, 60, 35, 3, darkerGrey);
+  buffer.setCursor(5, 20);
+  buffer.println("Back");
+
+  buffer.fillRoundRect(5, 45, 300, 175, 5, darkGrey);
+  buffer.fillRoundRect(315, 45, 125, 85, 5, darkGrey);
+  buffer.fillRoundRect(315, 135, 125, 85, 5, darkGrey);
+  buffer.fillRoundRect(5, 235, 435, 60, 5, darkGrey);
+
+  graphSprite.pushToSprite(&buffer, 15, 55);
 }
 
 #pragma endregion ProfilePage
@@ -1278,22 +1442,34 @@ void MonitorPage::DrawStatic() {
 
   // Draw the monitor page UI elements
 
-  // Title
-  buffer.setTextSize(2);
-  buffer.setCursor(140, 130);
-  buffer.println("Monitor");
-  buffer.setTextSize(1);
-  buffer.setCursor(95, 160);
-  buffer.println("Profile: None");
-
-  
   // Back Button and Header Bar
   buffer.fillRect(60,0, DRAW_WIDTH - 60, 35, darkGrey);
   buffer.fillRoundRect(0, 0, 60, 35, 3, darkerGrey);
   buffer.setCursor(5, 20);
   buffer.println("Back");
 
+  buffer.fillRoundRect(5, 45, 300, 175, 5, darkGrey);
+  buffer.fillRoundRect(315, 45, 125, 85, 5, darkGrey);
+  buffer.fillRoundRect(315, 135, 125, 85, 5, darkGrey);
+  buffer.fillRoundRect(5, 235, 435, 60, 5, darkGrey);
+
+  DrawGraph();
+  graphSprite.pushToSprite(&buffer, 15, 55);
+
   Push();
+}
+
+
+void MonitorPage::DrawGraph(){
+
+
+
+  if (currentProfile == nullptr) return;
+  
+
+}
+void MonitorPage::UpdateGraph(){
+  if (!profileRunning) return;
 }
 
 void MonitorPage::OnTouch(uint16_t x, uint16_t y) {
@@ -1417,7 +1593,7 @@ void PIDSettingsPage::DrawStatic(){
   buffer.fillRoundRect(0, 0, 60, 35, 3, darkerGrey);
   buffer.setCursor(5, 20);
   buffer.println("Back");
-
+  
   Push();
 }
 
@@ -1564,21 +1740,6 @@ void WiFiSettingsPage::OnRelease(uint16_t x, uint16_t y) {
 
 #pragma region WebPagesAndAPIs
 
-void NotFound(){
-  Serial.println("Not Found: " + server.uri());
-  server.send(404, "text/plain", "Not Found");
-}
-
-void OnConnect(){
-  fs::File file = LittleFS.open("/static/index.html", "r");
-  if (!file) {
-    Serial.println("Failed to open file for reading");
-    server.send(404, "text/plain", "File not found");
-    return;
-  }
-  server.streamFile(file, "text/html");
-  file.close();
-}
 
 #pragma endregion WebPagesAndAPIs
 
@@ -1586,7 +1747,15 @@ void OnConnect(){
 //                                    Debug Functions
 // ============================================================================================
 
-#pragma region DebugFunctions
+#pragma region DebugAndHelperFunctions
+
+void recvMsg(uint8_t *data, size_t len){
+  String d = "";
+  for(int i=0; i < len; i++){
+    d += char(data[i]);
+  }
+  WebSerial.println("Received: \"" + d + "\"");
+}
 
 void DisplayError(String message) {
   tft.fillScreen(TFT_BLACK);
@@ -1644,4 +1813,15 @@ void Beep(int duration){
   tone(BUZZER_PIN, 1000, duration); // 1kHz tone
 }
 
-#pragma endregion DebugFunctions
+String ulongToTime(unsigned long mills) {
+  unsigned long totalSeconds = mills / 1000;
+  unsigned long hours = totalSeconds / 3600;
+  unsigned long minutes = (totalSeconds % 3600) / 60;
+  unsigned long seconds = totalSeconds % 60;
+
+  char buffer[9];
+  snprintf(buffer, sizeof(buffer), "%02lu:%02lu:%02lu", hours, minutes, seconds);
+  return String(buffer);
+}
+
+#pragma endregion DebugAndHelperFunctions

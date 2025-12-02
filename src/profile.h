@@ -13,54 +13,59 @@ double start = 25;
 
 class ProfileStep {
   public:
-    static void begin(double* inputTop, double* inputBottom, double* setpointTop, double* setpointBottom) {
-      pInputTop = inputTop;
-      pInputBottom = inputBottom;
-      pSetpointTop = setpointTop;
-      pSetpointBottom = setpointBottom;
-    }
+
     // Target temperature for this step
-    double finalTempT, finalTempB;
+    double finalTemp;
     // Duration of this step in milliseconds, 
     // calculated by Init() based on this step's behavior and the previous step's final temperature
-    unsigned long duration; 
+    unsigned long duration, progressTime, startTime;
+    void TargetHeater(double** Input, double** Setpoint) {
+      pInput = Input;
+      pSetpoint = Setpoint;
+    }
+    
     // given the final target temperature of the last step, start this step
-    virtual void Init(double endTempT, double endTempB) = 0;
+    virtual void Init(double lastStepEndTemp) = 0;
     // Reset any internal variables to prepare for a new profile run
     virtual void Start() = 0;
     // update the setpoints based on the elapsed time and this step's behavior
-    virtual void Update(double* SetpointT, double* SetpointB) = 0;
+    virtual void Update() = 0;
     // Signal that the next step should start
     virtual bool IsComplete() = 0;
     // Draw itself on a graph sprite at position x,y with given step sizes (1 pixel = stepX in time, 1 pixel = stepY in temperature)
     virtual void DrawOnGraph(TFT_eSprite* graphSprite, uint16_t startX, uint16_t startY, double stepX, double stepY) = 0;
+  protected:
+    double **pInput, **pSetpoint;
+    double Temperature() {
+      return **pInput;
+    }
+    void Setpoint(double value) {
+      **pSetpoint = value;
+    }
 };
-
-
 
 class NameStep : public ProfileStep {
   public:
     NameStep(String* currentPhase, String phaseName) : currentPhase(currentPhase), phaseName(phaseName) {
-      finalTempT = 0;
-      finalTempB = 0;
+      finalTemp = 0;
       duration = 0;
     }
-    void Init(double endTempT, double endTempB) override {
+    void Init(double lastStepEndTemp) override {
       // does not affect temperatures
-      finalTempT = endTempT;
-      finalTempB = endTempB;
+      finalTemp = lastStepEndTemp;
     }
     void Start() override {
       *currentPhase = phaseName;
     }
-    void Update(double* SetpointT, double* SetpointB) override {
+    void Update() override {
       // does nothing
     }
     bool IsComplete() override {
       return true; // always complete
     }
     void DrawOnGraph(TFT_eSprite* graphSprite, uint16_t startX, uint16_t startY, double stepX, double stepY) override {
-      // does nothing
+      // draw a vertical line to indicate phase change
+      graphSprite->drawLine(startX, startY, startX, startY - GRAPH_HEIGHT, TFT_YELLOW);
     }
     String phaseName;
   private:
@@ -70,35 +75,30 @@ class NameStep : public ProfileStep {
 class BeepStep : public ProfileStep {
   public:
     BeepStep(unsigned long duration) {
-      this->duration = duration;
-      finalTempT = 0;
-      finalTempB = 0;
+      beepDuration = duration;
+      finalTemp = 0;
     }
-    void Init(double endTempT, double endTempB) override {
+    void Init(double lastStepEndTemp) override {
       // does not affect temperatures
-      finalTempT = endTempT;
-      finalTempB = endTempB;
+      finalTemp = lastStepEndTemp;
     }
     void Start() override {
       startTime = millis();
       // Trigger beep here
-      tone(BUZZER_PIN, 1000); // 1kHz tone
+      tone(BUZZER_PIN, 1000, beepDuration); // 1kHz tone
     }
-    void Update(double* SetpointT, double* SetpointB) override {
+    void Update() override {
       // does nothing
     }
     bool IsComplete() override {
-      if (millis() - startTime >= duration) {
-        noTone(BUZZER_PIN); // Stop the tone
-        return true;
-      }
-      return false;
+      return true; // immediately complete
     }
     void DrawOnGraph(TFT_eSprite* graphSprite, uint16_t startX, uint16_t startY, double stepX, double stepY) override {
-      // does nothing
+      // draw a small square to indicate beep
+      graphSprite->fillRect(startX - 1, startY - 2, 2, 4, TFT_ORANGE);
     }
   private:
-    unsigned long startTime; // time when this step started
+    unsigned long beepDuration;
 };
 
 // ------------- Profile steps for combined heating of top and bottom heater ------------
@@ -106,27 +106,60 @@ class BeepStep : public ProfileStep {
 // Linear ramp step
 class LinearRateStep : public ProfileStep {
   public:
-    LinearRateStep(double finalTemp, double rate);
-    void Init(double endTempT, double endTempB) override;
-    void Start() override;
-    void Update(double* SetpointT, double* SetpointB) override;
-    bool IsComplete() override;
-    void DrawOnGraph(TFT_eSprite* graphSprite, uint16_t startX, uint16_t startY, double stepX, double stepY) override;
+    LinearRateStep(double finalTemp, double rate){
+      this->rate = rate;
+      this->finalTemp = finalTemp;
+    }
+    void Init(double lastStepEndTemp) override{
+      // calculate duration based on rate and temperature difference
+      startTemp = lastStepEndTemp;
+      double tempDiff = finalTemp - lastStepEndTemp;
+      duration = (unsigned long)((tempDiff / rate) * 1000); // rate is in degrees per second
+    }
+    void Start() override{
+      startTime = millis();
+    }
+    void Update() override{
+      unsigned long progressTime = millis() - startTime;
+
+      double target = (rate * (progressTime / 1000.0)); // rate is in degrees per second
+
+      Setpoint(startTemp + target);
+      
+
+    }
+    bool IsComplete() override{
+      return millis() - startTime >= duration;
+    }
+    void DrawOnGraph(TFT_eSprite* graphSprite, uint16_t startX, uint16_t startY, double stepX, double stepY) override{
+
+    }
   private:
-    double startTempT, startTempB; // starting temperatures for this step
+    double rate, startTemp;
     unsigned long startTime; // time when this step started
 };
 
 class LinearTimeStep : public ProfileStep {
   public:
-    LinearTimeStep(double finalTemp, unsigned long duration);
-    void Init(double endTempT, double endTempB) override;
-    void Start() override;
-    void Update(double* SetpointT, double* SetpointB) override;
-    bool IsComplete() override;
-    void DrawOnGraph(TFT_eSprite* graphSprite, uint16_t startX, uint16_t startY, double stepX, double stepY) override;
+    LinearTimeStep(double finalTemp, unsigned long duration){
+
+    }
+    void Init(double endTemp) override{
+
+    }
+    void Start() override{
+
+    }
+    void Update() override{
+
+    }
+    bool IsComplete() override{
+      return millis() - startTime >= duration;
+    }
+    void DrawOnGraph(TFT_eSprite* graphSprite, uint16_t startX, uint16_t startY, double stepX, double stepY) override{
+
+    }
   private:
-    double startTempT, startTempB; // starting temperatures for this step
     unsigned long startTime; // time when this step started
     double rate; // rate of temperature change in degrees per minute
 };
@@ -134,12 +167,24 @@ class LinearTimeStep : public ProfileStep {
 // AFAP step -> may cause overshoot
 class InstantStep : public ProfileStep {
   public:
-    InstantStep(double finalTemp, unsigned long duration);
-    void Init(double endTempT, double endTempB) override;
-    void Start() override;
-    void Update(double* SetpointT, double* SetpointB) override;
-    bool IsComplete() override;
-    void DrawOnGraph(TFT_eSprite* graphSprite, uint16_t startX, uint16_t startY, double stepX, double stepY) override;
+    InstantStep(double finalTemp, unsigned long duration){
+
+    }
+    void Init(double endTemp) override{
+
+    }
+    void Start() override{
+
+    }
+    void Update() override{
+      
+    }
+    bool IsComplete() override{
+      return millis() - startTime >= duration;
+    }
+    void DrawOnGraph(TFT_eSprite* graphSprite, uint16_t startX, uint16_t startY, double stepX, double stepY) override{
+
+    }
 };
 
 
@@ -147,12 +192,22 @@ class InstantStep : public ProfileStep {
 struct Profile{
   public:
     Profile() : name(""), currentPhase("Idle"), stepCount(0), currentStep(0), running(false) {}
-    ProfileStep* steps[MAX_PROFILE_STEPS];
+
+    ProfileStep* stepsT[MAX_PROFILE_STEPS];
+    ProfileStep* stepsB[MAX_PROFILE_STEPS];
     String name, currentPhase;
     uint8_t stepCount;
     uint8_t currentStep;
-    bool running;
+    uint8_t totalPhases = 0;
+    bool running, twoSided = false;
 
+    static void begin(double* inputTop, double* inputBottom, double* setpointTop, double* setpointBottom) {
+      pInputTop = inputTop;
+      pInputBottom = inputBottom;
+      pSetpointTop = setpointTop;
+      pSetpointBottom = setpointBottom;
+    }
+    
     bool LoadFromFile(fs::File file){
       if (!file) return false;
 
@@ -160,14 +215,57 @@ struct Profile{
       currentPhase = "Idle";
       stepCount = 0;
       currentStep = 0;
+      totalPhases = 0;
       running = false;
+
+      int addTo = 0;
 
       // Read steps
       while (file.available()) {
         String line = file.readStringUntil('\n');
-        ProfileStep* step = ParseStep(line);
-        if (step) {
-          AddStep(step);
+
+        if (line.startsWith("#") || line.length() == 0) 
+          continue; // skip comments and empty lines
+
+        if (line.startsWith("S")) 
+          addTo = 0;
+        else if (line.startsWith("PT")){
+          addTo = 1; twoSided = true;
+        }
+        else if (line.startsWith("PB"))
+          addTo = 2;
+
+        switch (addTo) 
+        {
+        case 0: {
+          ProfileStep* stepT = ParseStep(line);
+          if (stepT && stepCount < MAX_PROFILE_STEPS) {
+            stepsT[stepCount] = stepT;
+            
+            // For single-sided steps, bottom uses the same step as top, but to prevent double updates, we create a new instance
+            ProfileStep* stepB = ParseStep(line);
+            stepsB[stepCount] = stepB; // for combined steps, both top and bottom use the same step
+            stepCount++;
+          }
+          break;
+        }
+        
+        case 1: {
+          ProfileStep* stepDT = ParseStep(line);
+          if (stepDT && stepCount <= MAX_PROFILE_STEPS) {
+            stepsB[stepCount - 1] = stepDT; // replace bottom step of last added top step
+          }
+          break;
+        }
+        case 2: {
+          ProfileStep* stepDB = ParseStep(line);
+          if (stepDB && stepCount <= MAX_PROFILE_STEPS) {
+            stepsT[stepCount - 1] = stepDB; // replace top step of last added bottom step
+          }
+          break;
+        }
+        default:
+          break;
         }
       }
 
@@ -182,10 +280,10 @@ struct Profile{
 
       char type = line[0];
       // initialize variables for parsing
-      String args[4];
+      String args[3];
       int argIndex = 0;
       int lastSpace = 0;
-      while (argIndex < 4) {
+      while (argIndex < 3) {
         int spaceIndex = line.indexOf(' ', lastSpace + 1);
         if (spaceIndex == -1) {
           args[argIndex++] = line.substring(lastSpace + 1);
@@ -197,58 +295,68 @@ struct Profile{
       }
 
       double target = 0, rate = 0;
-      double targetT = 0, targetB = 0, rateT = 0, rateB = 0;
       unsigned long duration = 0;
 
       switch (type)
       {
-      case 'N':
-        return new NameStep(&currentPhase, line.substring(2));
-        break;
       case 'L':
+        target = args[1].toDouble();
+        if (args[2].startsWith("R")) {
+          rate = args[2].substring(1).toDouble();
+          return new LinearRateStep(target, rate);
+        } else {
+          duration = args[2].substring(1).toInt() * 1000; // convert seconds to milliseconds
+          return new LinearTimeStep(target, duration);
+        }
         break;
       case 'I':
+        target = args[1].toDouble();
+        if (args[2].startsWith("INF")){
+          duration = 0xFFFFFFFF; // effectively infinite
+        } else {
+          duration = args[2].substring(1).toInt() * 1000; // convert seconds to milliseconds
+        }
+        return new InstantStep(target, duration);
+        break;
+      case 'N':
+        totalPhases++;
+        return new NameStep(&currentPhase, line.substring(2));
         break;
       case 'B':
-        return new BeepStep(args[1].toInt());
+        return new BeepStep(args[1].toInt()); // duration in milliseconds
         break;
       default:
+
         break;
       }
 
       return nullptr; // unknown step type
-
     }
 
-    void AddStep(ProfileStep* step) {
-      if (stepCount < MAX_PROFILE_STEPS) {
-        steps[stepCount++] = step;
-      }
-    }
     void Init() {
       if (stepCount > 0) {
-        steps[0]->Init(start, start);
+        stepsT[0]->Init(start);
       }
 
       for (uint8_t i = 1; i < stepCount; i++) {
-        steps[i]->Init(steps[i - 1]->finalTempT, steps[i - 1]->finalTempB);
+        stepsT[i]->Init(stepsT[i - 1]->finalTemp);
       }
       currentStep = 0;
       running = false;
     }
     void Start() {
       if (stepCount == 0) return;
-      steps[0]->Start();
+      stepsT[0]->Start();
       currentStep = 0;
       running = true;
     }
     void Update() {
       if (running && stepCount > 0) {
-        steps[currentStep]->Update(pSetpointTop, pSetpointBottom);
-        if (steps[currentStep]->IsComplete()) {
+        stepsT[currentStep]->Update();
+        if (stepsT[currentStep]->IsComplete()) {
           currentStep++;
           if (currentStep < stepCount) {
-            steps[currentStep]->Start();
+            stepsT[currentStep]->Start();
           } else {
             running = false; // profile complete
           }
@@ -257,7 +365,7 @@ struct Profile{
     }
     void Reset() {
       for (uint8_t i = 0; i < stepCount; i++) {
-        steps[i]->Start();
+        stepsT[i]->Start();
       }
       currentStep = 0;
       running = false;
@@ -270,7 +378,7 @@ struct Profile{
     unsigned long GetEstimatedDuration() {
       unsigned long total = 0;
       for (uint8_t i = 0; i < stepCount; i++) {
-        total += steps[i]->duration;
+        total += stepsT[i]->duration;
       }
       return total;
     }

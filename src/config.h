@@ -53,6 +53,9 @@
 #define DRAW_WIDTH 450 // Width of the drawable area
 #define DRAW_HEIGHT 290 // Height of the drawable area (excluding top bar)
 
+#define GRAPH_WIDTH 280 // Width of the profile graph area
+#define GRAPH_HEIGHT 155 // Height of the profile graph area
+
 #define SETTING_SUBPAGES 2 // number of subpages in the settings page
 #define NETWORK_SUBPAGES 1 // number of subpages in the network settings page
 
